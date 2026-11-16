@@ -419,8 +419,8 @@ LEAD_PREFIX         = "lead:"
 CONTATO_PEND_PREFIX = "contato_pendente:"
 DEMORA_PREFIX       = "demora:"
 LEAD_INFO_PREFIX    = "lead_info:"
-OI_TEXTO_KEY        = "config:oi_texto"
-OI_TEXTO_PADRAO     = "Oi! 👋"
+OI_TEXTO_KEY        = "config:isca_texto"
+OI_TEXTO_PADRAO     = "Vocês fazem clareamento? Quanto custa?"
 DEMORA_LIMITE_MIN   = float(os.environ.get("DEMORA_LIMITE_MIN", "5"))
 
 
@@ -608,18 +608,16 @@ def processar_retorno_lead(telefone: str):
 
 
 SEP_MSG          = "\n\n<<<MSG>>>\n\n"   # separa mensagens que saem separadas no WhatsApp
-PITCH_KEY        = "config:pitch_final"
+PITCH_KEY        = "config:pitch_conversao"
 PITCH_ENVIADO    = "pitch_enviado:"
 PITCH_PADRAO = (
-    "Viu só o que o seu assistente pode fazer pelos seus clientes? 😄 E isso é só o começo — ele faz muito mais:\n\n"
-    "✅ Atende 24h, inclusive à noite, fins de semana e feriados\n"
-    "✅ Responde horários, endereço e dúvidas na hora\n"
-    "✅ Qualifica o contato antes de chegar até você\n"
-    "✅ Agenda direto pelo WhatsApp\n"
-    "✅ Guarda o histórico de cada conversa num painel simples\n\n"
-    "E o melhor: sem mensalidade pelo uso da IA, você paga só o que consumir. "
-    "Pra ter ideia, essa nossa conversa custou cerca de {CONSUMO}.\n\n"
-    "Quer receber uma proposta? É só me passar seu nome e o melhor horário pra conversar 📲"
+    "É isso que seu paciente deve receber, mesmo às 23h de um domingo.\n\n"
+    "E você não precisa ser refém do WhatsApp para isso acontecer.\n"
+    "Quer saber como?\n\n"
+    "A Gente Assume para você\n\n"
+    "1. Quero que vocês assumam\n"
+    "2. Quero ver mais um pouco\n"
+    "3. Tenho uma dúvida"
 )
 
 
@@ -661,6 +659,185 @@ def frase_demora(telefone: str) -> str:
         return ""
     return (f"Repara só: você levou {tempo} pra me responder. "
             "Se fosse um cliente seu esperando esse tempo no WhatsApp, ele já poderia ter procurado outro profissional 😅")
+
+
+# ============================================================
+# FLUXO DE PROSPECCAO: isca -> ramo lento/rapido -> demo -> conversao
+# O SISTEMA escreve as mensagens fixas (nao depende da IA). A IA so conversa na demo.
+# ============================================================
+FLOW_PREFIX      = "flow:"
+FLOW_TTL         = 60 * 60 * 24 * 30
+FLUXO_LIMITE_SEG = int(float(os.environ.get("FLUXO_LIMITE_MIN", "10")) * 60)   # lento x rapido
+DEMO_TROCAS      = int(os.environ.get("DEMO_TROCAS", "4"))                      # respostas da IA ate a conversao
+TOQUE_HORAS      = float(os.environ.get("TOQUE_HORAS", "24"))                   # sem resposta -> toque
+PERGUNTAS_EXTRAS = ["Aceita convênio?", "Tem sábado?", "Dá pra parcelar?"]
+
+RESPOSTA_ISCA = ("Oi, tudo bem? Fazemos sim!\n\n"
+                 "Pra te passar o valor certinho: seria a primeira vez que você faz clareamento?")
+FECHO_DEMO = ("Na hora, sem ninguém parar o que está fazendo.\n\n"
+              "E isso sem eu saber nada do seu negócio ainda. Com os seus preços e horários, eu resolvo tudo ali mesmo.\n\n"
+              "Agora me pergunta qualquer coisa como se fosse um paciente. Vamos ver como eu me saio.")
+
+
+def obter_flow(telefone: str):
+    """Devolve (chave, estado) do fluxo do numero (considera a variante com/sem o 9)."""
+    for v in variantes_telefone(telefone):
+        dados = r.get(f"{FLOW_PREFIX}{v}")
+        if dados:
+            try:
+                return f"{FLOW_PREFIX}{v}", json.loads(dados)
+            except Exception:
+                pass
+    return None, None
+
+
+def salvar_flow(chave: str, fl: dict):
+    r.set(chave, json.dumps(fl), ex=FLOW_TTL)
+
+
+def horario_comercial() -> bool:
+    ag = agora_brasilia()
+    return ag.weekday() < 5 and 8 <= ag.hour < 19
+
+
+def _hora_curta(dt) -> str:
+    return f"{dt.hour}h" + (f"{dt.minute:02d}" if dt.minute else "")
+
+
+def quando_texto(iso_br: str) -> str:
+    """'Ontem as 15h40' ou 'Na sexta-feira as 15h40' (se passou fim de semana)."""
+    try:
+        dt = datetime.fromisoformat(iso_br)
+    except Exception:
+        return "Há pouco"
+    hora = _hora_curta(dt)
+    if (agora_brasilia().date() - dt.date()).days == 1:
+        return f"Ontem às {hora}"
+    dias = ["segunda-feira", "terça-feira", "quarta-feira", "quinta-feira", "sexta-feira", "sábado", "domingo"]
+    return f"{'No' if dt.weekday() >= 5 else 'Na'} {dias[dt.weekday()]} às {hora}"
+
+
+def msgs_ramo_lento(seg) -> list:
+    return [
+        "Preciso te contar: essa pergunta fui eu que mandei, no lugar de um paciente.\n\n"
+        f"Foram {fmt_duracao(seg)} esperando a sua resposta.",
+        "E eu sei por quê: quem responde o WhatsApp está sempre no meio de outra coisa.\n\n"
+        "Não dá pra largar, mas também não dá pra viver refém dele.\n\n"
+        "Olha como esse paciente teria sido atendido:",
+        RESPOSTA_ISCA,
+        FECHO_DEMO,
+    ]
+
+
+def msgs_ramo_rapido(tempos: list) -> list:
+    media = sum(tempos) / max(len(tempos), 1)
+    return [
+        "Preciso te contar: essas perguntas fui eu que mandei, no lugar de um paciente.\n\n"
+        f"E você mandou muito bem: resposta em {fmt_duracao(media)}, tudo certinho. Ou seja, o difícil você já tem.",
+        "Mas quanto do dia você está perdendo respondendo WhatsApp?\n\n"
+        "Cada mensagem é alguém parando o que está fazendo. E à noite e no fim de semana, ninguém responde.\n\n"
+        "Mas não precisa ser assim. Olha como ele poderia ter sido atendido a qualquer momento, "
+        "mesmo às 23h de um domingo qualquer:",
+        RESPOSTA_ISCA,
+        FECHO_DEMO,
+    ]
+
+
+def msgs_toque(fl: dict) -> list:
+    return [
+        f"{quando_texto(fl.get('enviado_br', ''))} mandei uma pergunta aqui, no lugar de um paciente, e ela ficou sem resposta.",
+        "Imagino que você estava no meio do trabalho, e é isso mesmo: não dá pra viver no celular respondendo dúvida no WhatsApp.\n\n"
+        "Mas esse paciente provavelmente já procurou outra clínica neste tempo.\n\n"
+        "E não precisava ser assim. Olha como ele teria sido atendido:",
+        RESPOSTA_ISCA,
+        FECHO_DEMO,
+    ]
+
+
+def _virar_usuario(telefone: str):
+    """O lead respondeu: vira usuario e a IA nao deve repetir o 'primeiro contato'."""
+    processar_retorno_lead(telefone)
+    r.delete(f"{CONTATO_PEND_PREFIX}{telefone}")
+
+
+def fluxo_resposta(telefone: str, texto: str, chegada: datetime):
+    """Se o numero esta no fluxo de prospeccao e ainda numa fase escrita pelo sistema, devolve a
+    lista de mensagens a enviar. Devolve None para a IA responder (demo)."""
+    chave, fl = obter_flow(telefone)
+    if not fl:
+        return None
+    fase = fl.get("fase")
+
+    if fase == "toque24":                      # voltou depois do toque de 24h
+        _virar_usuario(telefone)
+        salvar_mensagem(telefone, "user", fl.get("isca_texto") or OI_TEXTO_PADRAO)
+        salvar_mensagem(telefone, "assistant", "\n\n".join(msgs_toque(fl)))
+        fl["fase"] = "demo"
+        salvar_flow(chave, fl)
+        return None
+
+    if fase not in ("isca", "extras"):
+        return None                            # demo / fim: IA
+
+    agora = datetime.now()
+    ref = fl.get("enviado_em") if fase == "isca" else fl.get("ultimo_envio")
+    try:
+        seg = max(0, int((chegada - datetime.fromisoformat(ref)).total_seconds()))
+    except Exception:
+        seg = 0
+    if fase == "isca":
+        _virar_usuario(telefone)
+        fl["tempos"] = []
+    fl.setdefault("tempos", []).append(seg)
+    salvar_mensagem(telefone, "user", texto)
+
+    tempos = fl["tempos"]
+    if seg > FLUXO_LIMITE_SEG:
+        msgs = msgs_ramo_lento(max(tempos))
+    elif len(tempos) <= len(PERGUNTAS_EXTRAS):
+        msgs = [PERGUNTAS_EXTRAS[len(tempos) - 1]]
+        fl["fase"] = "extras"
+        fl["ultimo_envio"] = agora.isoformat()
+        salvar_flow(chave, fl)
+        salvar_mensagem(telefone, "assistant", msgs[0])
+        return msgs
+    else:
+        msgs = msgs_ramo_rapido(tempos)
+
+    fl["fase"] = "demo"
+    fl["trocas"] = 0
+    salvar_flow(chave, fl)
+    salvar_mensagem(telefone, "assistant", "\n\n".join(msgs))
+    return msgs
+
+
+def pitch_forcado(telefone: str) -> str:
+    """Mensagem final de conversao (uma vez so por conversa)."""
+    if r.get(f"{PITCH_ENVIADO}{telefone}"):
+        return ""
+    r.set(f"{PITCH_ENVIADO}{telefone}", "1")
+    return obter_pitch().replace("{CONSUMO}", consumo_texto(telefone))
+
+
+def bloco_prospeccao(telefone: str) -> str:
+    _, fl = obter_flow(telefone)
+    if not fl or fl.get("fase") not in ("demo", "fim"):
+        return ""
+    txt = ("\n\n=== MODO PROSPECCAO ===\n"
+           "O SISTEMA ja enviou o aviso de que isto e uma simulacao e a primeira pergunta ao 'paciente'. "
+           "NAO se apresente de novo, NAO repita o aviso e NAO use a MENSAGEM 1 do script do nicho. "
+           "A pessoa e um profissional fazendo o papel de paciente: atenda-a como paciente e siga as mensagens 2, 3 e 4 do "
+           "script do nicho, uma pergunta por vez, respondendo antes qualquer pergunta direta dela. "
+           "NAO escreva venda, NAO fale de custo, NAO escreva 'fim da simulacao' e NAO encerre a demo: "
+           "o SISTEMA encerra depois de algumas trocas e envia sozinho a mensagem final com as opcoes 1, 2 e 3.\n")
+    if fl.get("fase") == "fim":
+        txt += ("A mensagem final com as opcoes JA foi enviada. Se a pessoa responder 1 (ou disser que quer contratar): "
+                "colete nome e melhor horario, uma pergunta por vez (ETAPA 5). "
+                "Se responder 2: diga que pode seguir perguntando como paciente e continue a simulacao. "
+                "Se responder 3 ou perguntar sobre o servico: responda curto e honesto (voce cuida do WhatsApp do negocio, "
+                "responde os clientes 24h; sem mensalidade pelo uso da IA, paga so o que consumir; os valores sao combinados em proposta) "
+                "e volte a oferecer as opcoes.\n")
+    return txt + "=== FIM ===\n"
 
 
 def bloco_area_livre(telefone: str, nicho) -> str:
@@ -994,7 +1171,7 @@ async def chamar_claude(telefone: str, mensagem_usuario: str) -> str:
                            f"{conteudo_nicho}\n=== FIM DO SCRIPT DO NICHO ===\n")
 
     prefixo_demora = frase_demora(telefone)
-    bloco_contato = bloco_primeiro_contato(telefone) + bloco_area_livre(telefone, nicho)
+    bloco_contato = bloco_primeiro_contato(telefone) + bloco_area_livre(telefone, nicho) + bloco_prospeccao(telefone)
     system = prompt_base + bloco_nicho + bloco_contato + f"\n\nDATA ATUAL: {dia_semana}, {hoje}\nSTATUS DO USUARIO: {status_usuario}\nLINK DE PAGAMENTO: {link_pg}"
 
     resposta = client.messages.create(
@@ -1009,6 +1186,14 @@ async def chamar_claude(telefone: str, mensagem_usuario: str) -> str:
     texto_bot = resposta.content[0].text
     partes = ([prefixo_demora] if prefixo_demora else []) + [texto_bot]
     pitch = pitch_final_se_acabou(telefone, texto_bot)
+    _chave_fl, _fl = obter_flow(telefone)
+    if _fl and _fl.get("fase") == "demo":
+        _fl["trocas"] = int(_fl.get("trocas", 0)) + 1
+        if not pitch and _fl["trocas"] >= DEMO_TROCAS:
+            pitch = pitch_forcado(telefone)
+        if pitch:
+            _fl["fase"] = "fim"
+        salvar_flow(_chave_fl, _fl)
     if pitch:
         partes.append(pitch)
     texto_resposta = "\n\n".join(partes)          # o que fica no historico
@@ -2207,7 +2392,7 @@ def painel_leads(admin: str = Depends(verificar_admin), msg: str = ""):
         <div class="aluno-row">
             <div><strong>{nome}</strong> <span class="badge badge-freemium">{tel}</span>{nicho_lead_badge(l)}</div>
             <div style="display:flex;gap:6px">
-                <form method="post" action="/admin/leads/oi/{tel}"><button type="submit" class="btn btn-primary">👋 Oi</button></form>
+                <form method="post" action="/admin/leads/oi/{tel}"><button type="submit" class="btn btn-primary">Enviar isca</button></form>
                 <form method="post" action="/admin/leads/remover/{tel}" onsubmit="return confirm('Remover este lead?')"><button type="submit" class="btn btn-danger">Remover</button></form>
             </div>
         </div>"""
@@ -2222,16 +2407,18 @@ def painel_leads(admin: str = Depends(verificar_admin), msg: str = ""):
             ha = fmt_duracao((agora - datetime.fromisoformat(l["enviado_em"])).total_seconds())
         except Exception:
             ha = "?"
+        _, _flx = obter_flow(l.get("telefone", ""))
+        extra_flow = " · toque de 24h enviado" if (_flx or {}).get("fase") == "toque24" else ""
         rows_env += f"""
         <div class="aluno-row">
             <div>
                 <div><strong>{nome}</strong> <span class="badge badge-freemium">{tel}</span> <span class="badge badge-pendente">aguardando resposta</span>{nicho_lead_badge(l)}</div>
-                <div class="aluno-info">oi enviado ha {ha}</div>
+                <div class="aluno-info">isca enviada ha {ha}{extra_flow}</div>
             </div>
             <form method="post" action="/admin/leads/remover/{tel}" onsubmit="return confirm('Remover este lead?')"><button type="submit" class="btn btn-danger">Remover</button></form>
         </div>"""
     if not rows_env:
-        rows_env = "<p style='color:#888;padding:12px 0'>Nenhum oi enviado aguardando resposta.</p>"
+        rows_env = "<p style='color:#888;padding:12px 0'>Nenhuma isca aguardando resposta.</p>"
 
     conteudo = f"""
     {aviso}
@@ -2256,8 +2443,8 @@ def painel_leads(admin: str = Depends(verificar_admin), msg: str = ""):
     </div>
 
     <div class="card">
-        <h2>Mensagem do "Oi"</h2>
-        <p style="font-size:13px;color:#888;margin-bottom:10px;">Use <code>{{nome}}</code> para incluir o nome do lead (ex: <code>Oi {{nome}}! 👋</code>). Sem nome, o marcador some.</p>
+        <h2>Mensagem da isca</h2>
+        <p style="font-size:13px;color:#888;margin-bottom:10px;">Pergunta que o sistema manda no lugar de um paciente (ex: <code>Vocês fazem clareamento? Quanto custa?</code>). Enviar em horario comercial (seg a sex, 8h as 19h).</p>
         <form method="post" action="/admin/leads/texto" style="display:flex;gap:10px;align-items:center">
             <input type="text" name="oi_texto" value="{esc(obter_oi_texto())}">
             <button type="submit" class="btn btn-primary">Salvar</button>
@@ -2265,8 +2452,8 @@ def painel_leads(admin: str = Depends(verificar_admin), msg: str = ""):
     </div>
 
     <div class="card">
-        <h2>Mensagem de venda (final da demo)</h2>
-        <p style="font-size:13px;color:#888;margin-bottom:10px;">Enviada automaticamente, em mensagem separada, assim que a simulacao termina. Use <code>{{CONSUMO}}</code> para o custo real da conversa.</p>
+        <h2>Mensagem final (conversao)</h2>
+        <p style="font-size:13px;color:#888;margin-bottom:10px;">Enviada automaticamente depois de {DEMO_TROCAS} respostas da demo. Opcionalmente use <code>{{CONSUMO}}</code> para o custo real da conversa.</p>
         <form method="post" action="/admin/leads/pitch">
             <textarea name="pitch" style="min-height:230px">{esc(obter_pitch())}</textarea>
             <br><br>
@@ -2280,7 +2467,7 @@ def painel_leads(admin: str = Depends(verificar_admin), msg: str = ""):
     </div>
 
     <div class="card">
-        <h2>Oi enviado — aguardando resposta ({len(enviados)})</h2>
+        <h2>Isca enviada — aguardando resposta ({len(enviados)})</h2>
         <p style="font-size:13px;color:#888;margin-bottom:8px;">Quando a pessoa responde, ela sai daqui e aparece em Usuarios.</p>
         {rows_env}
     </div>"""
@@ -2297,14 +2484,19 @@ async def leads_importar(texto: str = Form(""), admin: str = Depends(verificar_a
 async def leads_oi(tel: str, admin: str = Depends(verificar_admin)):
     lead = obter_lead(tel)
     if not lead or lead.get("status") == "enviado":
-        return _redir_leads("Lead nao encontrado ou o oi ja foi enviado")
-    ok = await enviar_whatsapp(lead["telefone"], montar_oi_texto(lead))
+        return _redir_leads("Lead nao encontrado ou a isca ja foi enviada")
+    texto_isca = montar_oi_texto(lead)
+    ok = await enviar_whatsapp(lead["telefone"], texto_isca)
     if not ok:
         return _redir_leads("Nao consegui enviar. Confira as variaveis da Z-API no Railway e se o WhatsApp esta conectado.")
     lead["status"]     = "enviado"
     lead["enviado_em"] = datetime.now().isoformat()
     salvar_lead(lead)
-    return _redir_leads(f"Oi enviado para {lead.get('nome') or lead['telefone']}")
+    salvar_flow(f"{FLOW_PREFIX}{lead['telefone']}", {
+        "fase": "isca", "enviado_em": lead["enviado_em"], "enviado_br": agora_brasilia().isoformat(),
+        "isca_texto": texto_isca, "tempos": [], "trocas": 0})
+    aviso = "" if horario_comercial() else " (atencao: fora do horario comercial)"
+    return _redir_leads(f"Isca enviada para {lead.get('nome') or lead['telefone']}{aviso}")
 
 
 @app.post("/admin/leads/remover/{tel}")
@@ -2322,7 +2514,7 @@ async def leads_pitch(pitch: str = Form(""), admin: str = Depends(verificar_admi
 @app.post("/admin/leads/texto")
 async def leads_texto(oi_texto: str = Form(""), admin: str = Depends(verificar_admin)):
     r.set(OI_TEXTO_KEY, oi_texto.strip() or OI_TEXTO_PADRAO)
-    return _redir_leads("Mensagem do oi salva")
+    return _redir_leads("Mensagem da isca salva")
 
 
 # ============================================================
@@ -2346,6 +2538,7 @@ def agendar_resposta(telefone: str, texto: str):
     o prazo recomeca e as mensagens sao juntadas numa resposta so."""
     r.rpush(f"{FILA_PREFIX}{telefone}", texto)
     r.expire(f"{FILA_PREFIX}{telefone}", 3600)
+    r.set(f"fila_t:{telefone}", datetime.now().isoformat(), nx=True, ex=3600)   # hora da 1a mensagem do grupo
     seq = r.incr(f"{FILA_SEQ_PREFIX}{telefone}")
     r.expire(f"{FILA_SEQ_PREFIX}{telefone}", 3600)
     tarefa = asyncio.create_task(_responder_apos_espera(telefone, int(seq)))
@@ -2362,19 +2555,73 @@ async def _responder_apos_espera(telefone: str, seq: int):
             pipe = r.pipeline()
             pipe.lrange(f"{FILA_PREFIX}{telefone}", 0, -1)
             pipe.delete(f"{FILA_PREFIX}{telefone}")
-            mensagens = pipe.execute()[0]
+            pipe.get(f"fila_t:{telefone}")
+            pipe.delete(f"fila_t:{telefone}")
+            _res = pipe.execute()
+            mensagens = _res[0]
             if not mensagens:
                 return
+            try:
+                chegada = datetime.fromisoformat(_res[2])
+            except Exception:
+                chegada = datetime.now()
             texto = "\n".join(mensagens)
             if len(mensagens) > 1:
                 print(f"AGRUPADAS {len(mensagens)} mensagens de {telefone}")
-            resposta = await chamar_claude(telefone, texto)
+            msgs_fluxo = fluxo_resposta(telefone, texto, chegada)
+            if msgs_fluxo is not None:
+                resposta = SEP_MSG.join(msgs_fluxo)
+            else:
+                resposta = await chamar_claude(telefone, texto)
             for i, parte in enumerate(p for p in resposta.split(SEP_MSG) if p.strip()):
                 if i:
                     await asyncio.sleep(2)
                 await enviar_whatsapp(telefone, parte)
     except Exception as e:
         print(f"ERRO ao responder {telefone}: {e}")
+
+
+async def _verificar_toques():
+    if not horario_comercial():
+        return
+    for chave in r.keys(f"{FLOW_PREFIX}*"):
+        tel = chave[len(FLOW_PREFIX):]
+        try:
+            fl = json.loads(r.get(chave) or "{}")
+            if fl.get("fase") != "isca":
+                continue
+            decorrido = (datetime.now() - datetime.fromisoformat(fl["enviado_em"])).total_seconds()
+            if decorrido < TOQUE_HORAS * 3600:
+                continue
+            async with _lock_conversa(tel):
+                fl = json.loads(r.get(chave) or "{}")
+                if fl.get("fase") != "isca":
+                    continue
+                fl["fase"] = "toque24"          # marca antes de enviar: nunca duplica
+                salvar_flow(chave, fl)
+                print(f"TOQUE 24h para {tel}")
+                for i, m in enumerate(msgs_toque(fl)):
+                    if i:
+                        await asyncio.sleep(2)
+                    await enviar_whatsapp(tel, m)
+        except Exception as e:
+            print(f"ERRO toque {tel}: {e}")
+
+
+async def _loop_toques():
+    while True:
+        await asyncio.sleep(60)
+        try:
+            await _verificar_toques()
+        except Exception as e:
+            print(f"ERRO loop toques: {e}")
+
+
+@app.on_event("startup")
+async def _iniciar_rotinas():
+    tarefa = asyncio.create_task(_loop_toques())
+    _tarefas_ativas.add(tarefa)
+    tarefa.add_done_callback(_tarefas_ativas.discard)
 
 
 # ============================================================
