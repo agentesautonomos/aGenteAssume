@@ -522,19 +522,33 @@ def importar_leads(texto: str) -> dict:
         if not tel:
             res["invalidos"] += 1
             continue
-        ja_usuario = any(r.get(f"historico:{v}") for v in variantes_telefone(tel))
-        if obter_lead(tel) or ja_usuario:
-            res["duplicados"] += 1
-            continue
-        salvar_lead({"telefone": tel, "nome": nome[:80], "nicho_texto": nicho_txt[:60],
-                     "status": "pendente", "importado_em": datetime.now().isoformat()})
-        res["importados"] += 1
+        resultado = adicionar_lead(nome, tel, nicho_txt)
+        res[{"ok": "importados", "duplicado": "duplicados"}.get(resultado, "invalidos")] += 1
     return res
+
+
+def adicionar_lead(nome: str, tel: str, nicho_txt: str = "", extra: dict | None = None) -> str:
+    """Cria um lead pendente. Devolve 'ok', 'duplicado' ou 'invalido' (inclui telefone fixo)."""
+    resto = tel[2:] if tel.startswith("55") else tel
+    if (len(resto) == 10 and resto[2] in "2345") or (len(resto) == 11 and resto[2] != "9"):
+        return "invalido"   # telefone fixo nao recebe WhatsApp
+    ja_usuario = any(r.get(f"historico:{v}") for v in variantes_telefone(tel))
+    if obter_lead(tel) or ja_usuario:
+        return "duplicado"
+    lead = {"telefone": tel, "nome": (nome or "")[:80], "nicho_texto": (nicho_txt or "")[:60],
+            "status": "pendente", "importado_em": datetime.now().isoformat()}
+    for k, v in (extra or {}).items():
+        if v not in (None, ""):
+            lead[k] = str(v)[:200]
+    salvar_lead(lead)
+    return "ok"
 
 
 def nicho_lead_badge(lead: dict) -> str:
     n = (lead.get("nicho_texto") or "").strip()
-    return f' <span class="badge badge-ativo">{esc(n)}</span>' if n else ""
+    c = (lead.get("cidade") or "").strip()
+    return (f' <span class="badge badge-ativo">{esc(n)}</span>' if n else "") + \
+           (f' <span class="badge badge-freemium">{esc(c)}</span>' if c else "")
 
 
 def montar_oi_texto(lead: dict) -> str:
@@ -594,7 +608,7 @@ def processar_retorno_lead(telefone: str):
     if not lead:
         return
     apagar_lead(telefone)
-    info = {"nome": lead.get("nome", ""), "nicho_texto": lead.get("nicho_texto", "")}
+    info = {"nome": lead.get("nome", ""), "nicho_texto": lead.get("nicho_texto", ""), "cidade": lead.get("cidade", "")}
     r.set(f"{LEAD_INFO_PREFIX}{telefone}", json.dumps(info))
     pend = dict(info)
     if lead.get("status") == "enviado" and lead.get("enviado_em"):
@@ -2507,6 +2521,44 @@ async def leads_oi(tel: str, admin: str = Depends(verificar_admin)):
         "isca_texto": texto_isca, "tempos": [], "trocas": 0})
     aviso = "" if horario_comercial() else " (atencao: fora do horario comercial)"
     return _redir_leads(f"Isca enviada para {lead.get('nome') or lead['telefone']}{aviso}")
+
+
+LEADS_API_KEY = os.environ.get("LEADS_API_KEY", "")
+
+
+@app.post("/api/leads")
+async def api_leads(request: Request):
+    """Recebe leads de fora (ex: scraper). Header X-API-Key = variavel LEADS_API_KEY.
+    Corpo JSON: um lead, uma lista, ou {"leads": [...]}. Campos: nome, telefone, nicho, cidade, endereco, site, avaliacao, maps_url."""
+    if not LEADS_API_KEY:
+        raise HTTPException(status_code=503, detail="LEADS_API_KEY nao configurada no servidor")
+    if not secrets.compare_digest(request.headers.get("x-api-key", "").encode(), LEADS_API_KEY.encode()):
+        raise HTTPException(status_code=401, detail="chave invalida")
+    try:
+        corpo = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="JSON invalido")
+    if isinstance(corpo, dict) and isinstance(corpo.get("leads"), list):
+        itens = corpo["leads"]
+    elif isinstance(corpo, list):
+        itens = corpo
+    else:
+        itens = [corpo]
+    res = {"recebidos": len(itens), "importados": 0, "duplicados": 0, "invalidos": 0}
+    for it in itens[:2000]:
+        if not isinstance(it, dict):
+            res["invalidos"] += 1
+            continue
+        tel = normalizar_telefone(str(it.get("telefone") or it.get("phone") or ""))
+        if not tel:
+            res["invalidos"] += 1
+            continue
+        resultado = adicionar_lead(
+            str(it.get("nome") or ""), tel, str(it.get("nicho") or "dentista"),
+            {k: it.get(k) for k in ("cidade", "endereco", "site", "avaliacao", "maps_url")})
+        res[{"ok": "importados", "duplicado": "duplicados"}.get(resultado, "invalidos")] += 1
+    print(f"API LEADS: {res}")
+    return res
 
 
 @app.post("/admin/zerar-banco")
