@@ -2056,6 +2056,8 @@ def apagar_historico(telefone: str, admin: str = Depends(verificar_admin)):
         r.delete(f"{TOKENS_PREFIX}{tel}")
         r.delete(f"{CONSULTA_PREFIX}{tel}")
         r.delete(f"{LEAD_PREFIX}{tel}")
+        r.delete(f"{FLOW_PREFIX}{tel}")
+        r.delete(f"fila:{tel}", f"fila_seq:{tel}", f"fila_t:{tel}")
     return RedirectResponse(url="/admin")
 
 # ============================================================
@@ -2462,6 +2464,14 @@ def painel_leads(admin: str = Depends(verificar_admin), msg: str = ""):
     </div>
 
     <div class="card">
+        <h2>Zerar banco</h2>
+        <p style="font-size:13px;color:#888;margin-bottom:10px;">Apaga todos os leads, usuarios, conversas e contadores de tokens, para recomecar os testes do zero. Mantem o prompt, os arquivos de nicho e os textos.</p>
+        <form method="post" action="/admin/zerar-banco" onsubmit="return confirm('Apagar TODOS os leads, usuarios e conversas? Nao tem volta.')">
+            <button type="submit" class="btn btn-danger">Zerar banco</button>
+        </form>
+    </div>
+
+    <div class="card">
         <h2>Pendentes ({len(pendentes)})</h2>
         {rows_pend}
     </div>
@@ -2499,9 +2509,25 @@ async def leads_oi(tel: str, admin: str = Depends(verificar_admin)):
     return _redir_leads(f"Isca enviada para {lead.get('nome') or lead['telefone']}{aviso}")
 
 
+@app.post("/admin/zerar-banco")
+async def zerar_banco(admin: str = Depends(verificar_admin)):
+    """Apaga leads, usuarios, conversas, fluxos e contadores (inclusive o total de tokens).
+    Mantem prompt, arquivos de nicho, textos e configuracoes, agenda e assinaturas."""
+    padroes = ["historico:*", "nicho:*", "contato_pendente:*", "demora:*", "lead_info:*", "lead:*",
+               "pitch_enviado:*", "tokens:*", "consulta:*", "flow:*", "fila:*", "fila_seq:*", "fila_t:*"]
+    total = 0
+    for padrao in padroes:
+        for chave in r.keys(padrao):
+            r.delete(chave)
+            total += 1
+    return _redir_leads(f"Banco zerado ({total} registros apagados). Prompt, arquivos e textos foram mantidos.")
+
+
 @app.post("/admin/leads/remover/{tel}")
 async def leads_remover(tel: str, admin: str = Depends(verificar_admin)):
     apagar_lead(tel)
+    for v in variantes_telefone(tel):
+        r.delete(f"{FLOW_PREFIX}{v}")
     return _redir_leads("Lead removido")
 
 
