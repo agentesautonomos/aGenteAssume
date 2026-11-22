@@ -39,6 +39,10 @@ client   = Anthropic(api_key=ANTHROPIC_API_KEY)
 app      = FastAPI()
 security = HTTPBasic()
 
+# Area da clinica (login por clinica, painel, atendimento de pacientes) — ver clinicas.py
+from clinicas import router as clinicas_router
+app.include_router(clinicas_router)
+
 # ============================================================
 # REDIS
 # ============================================================
