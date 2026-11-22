@@ -184,3 +184,23 @@ Se o usuario quiser agendar uma sessao, envie:
 | `config:agent_prompt` | Prompt editável pelo painel |
 | `config:agenda` | Configurações de horários e valor |
 | `config:arquivo:{nome}` | Arquivos de referência do prompt |
+
+---
+
+## Área da clínica (clinicas.py)
+
+Atendimento de pacientes por clínica, com login próprio. Fica em `clinicas.py` e não mexe no fluxo de prospecção (`/webhook`, `/admin/leads`, `/api/leads`).
+
+| Rota | Descrição |
+|------|-----------|
+| `/entrar` | Login da clínica (e-mail e senha; o login já identifica a clínica) |
+| `/painel` | Status do WhatsApp, liga/desliga do assistente, contadores, fila "esperando a equipe", últimas conversas |
+| `/painel/conversa/{tel}` | Conversa completa, assumir / devolver ao assistente |
+| `/painel/agendamentos` | Pedidos de agendamento anotados pelo assistente |
+| `/painel/configuracoes` | Clínica, profissionais, horários, convênios e regras. Geram o prompt |
+| `/admin/clinicas` | (admin) Cadastrar clínica, acessos e Z-API de cada uma |
+| `/webhook/clinica/{slug}/{chave}` | Webhook da Z-API de cada clínica |
+
+Para ligar uma clínica: criar em `/admin/clinicas` com os dados da instância Z-API dela, clicar em "Configurar isso na Z-API automaticamente" (ou colar o webhook e ligar "notificar as enviadas por mim" no painel da Z-API), preencher as configurações e ligar o assistente.
+
+Variáveis opcionais: `CLINICA_MODEL` (padrão: `AGENT_MODEL`), `CLINICA_DEBOUNCE_SEGUNDOS` (padrão 10). Dados no Redis com prefixo `cl:`.
