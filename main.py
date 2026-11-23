@@ -1841,6 +1841,11 @@ async def webhook_mercadopago(request: Request):
         if not id_mp:
             return {"status": "ignorado"}
 
+        # Assinatura de clinica (area da clinica, clinicas.py)? Se for, para aqui.
+        from clinicas import tratar_webhook_mp
+        if await tratar_webhook_mp(str(tipo), str(id_mp)):
+            return {"status": "ok"}
+
         # Assinatura criada ou atualizada
         if "subscription" in tipo or "preapproval" in tipo:
             await processar_assinatura_mp(str(id_mp))
