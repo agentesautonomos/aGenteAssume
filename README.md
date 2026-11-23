@@ -204,3 +204,18 @@ Atendimento de pacientes por clínica, com login próprio. Fica em `clinicas.py`
 Para ligar uma clínica: criar em `/admin/clinicas` com os dados da instância Z-API dela, clicar em "Configurar isso na Z-API automaticamente" (ou colar o webhook e ligar "notificar as enviadas por mim" no painel da Z-API), preencher as configurações e ligar o assistente.
 
 Variáveis opcionais: `CLINICA_MODEL` (padrão: `AGENT_MODEL`), `CLINICA_DEBOUNCE_SEGUNDOS` (padrão 10). Dados no Redis com prefixo `cl:`.
+
+### Conta própria da clínica (criar conta, esqueci a senha, assinatura)
+
+Fluxo: `agenteassume.com.br` → botão Entrar → `app.agenteassume.com.br/entrar` → **Criar conta** → `/assinar` (Mercado Pago, mensalidade no cartão) → painel. Depois do pagamento vocês recebem um aviso para criar a instância Z-API da clínica; ela lê o QR Code em `/painel/whatsapp`.
+
+| Variável | Para quê |
+|----------|----------|
+| `CLINICA_MP_ACCESS_TOKEN` | Access Token do Mercado Pago (se vazio, usa `MP_ACCESS_TOKEN`) |
+| `EMAIL_FROM` | Remetente (padrão `nao-responda@agenteassume.com.br`) |
+| `RESEND_API_KEY` ou `BREVO_API_KEY` | Envio de e-mail por API (o plano Hobby do Railway bloqueia SMTP) |
+| `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASS` | Envio por SMTP (só no plano Pro do Railway) |
+| `AVISO_EMAIL`, `AVISO_WHATSAPP` | Onde vocês recebem "clínica nova pagou" |
+| `ZAPI_PARTNER_TOKEN` | Token de parceiro (integrador) da Z-API. Com ele, a instância da clínica é criada e assinada sozinha depois do pagamento. Usa o `ZAPI_CLIENT_TOKEN` da conta. |
+
+O valor da mensalidade fica em `/admin/clinicas` (card Plano). No Mercado Pago, aponte o webhook de **Assinaturas** para `https://app.agenteassume.com.br/webhook/mercadopago`; mesmo sem ele, o painel confere a assinatura na volta do pagamento e a cada 12 horas.
