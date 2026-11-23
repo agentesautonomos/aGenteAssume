@@ -1143,6 +1143,8 @@ def form_clinica(c: dict) -> str:
 async def admin_clinicas(msg: str = "", admin: str = Depends(exigir_admin)):
     linhas = []
     for c in listar_clinicas():
+        if situacao(c) != "ativa" and not c.get("desativada"):
+            continue          # quem ainda nao pagou aparece so em "leads"
         st = await status_conexao(c)
         n_users = R.scard(K(c["slug"], "usuarios"))
         linhas.append(f"""<tr><td><b><a href="/admin/clinicas/{c['slug']}">{esc(c['nome'])}</a></b><br>
@@ -1150,11 +1152,11 @@ async def admin_clinicas(msg: str = "", admin: str = Depends(exigir_admin)):
           <td>{esc(st['estado'])}</td><td>{'ligado' if c.get('bot_ativo') else 'desligado'}</td>
           <td>{n_users}</td><td>{'desativada' if c.get('desativada') else esc(rotulo_situacao(c))}</td></tr>""")
     tabela = ("<table><tr><th>Clínica</th><th>WhatsApp</th><th>Assistente</th><th>Usuários</th><th>Situação</th></tr>"
-              + "".join(linhas) + "</table>") if linhas else '<div class="vazio">Nenhuma clínica ainda.</div>'
+              + "".join(linhas) + "</table>") if linhas else '<div class="vazio">Nenhuma clínica assinante ainda.</div>'
     aviso = f'<div class="aviso">{esc(msg)}</div>' if msg else ""
     corpo = f"""<p style="margin-bottom:12px"><a href="/admin">Painel admin</a></p>{aviso}
     {html_leads()}
-    <div class="card"><h2>Clínicas</h2>{tabela}</div>
+    <div class="card"><h2>Clínicas (assinantes)</h2>{tabela}</div>
     {html_admin_plano()}
     <form method="post" action="/admin/clinicas/nova" class="card"><h2>Nova clínica (cadastro feito por vocês, sem pagamento)</h2>
       {form_clinica({})}
@@ -1198,7 +1200,18 @@ async def admin_clinica(slug: str, msg: str = "", admin: str = Depends(exigir_ad
     if not c:
         raise HTTPException(status_code=404)
     st = await status_conexao(c)
-    users = "".join(f"<li>{esc(u.get('nome') or '')} &lt;{esc(u['email'])}&gt;</li>" for u in usuarios_da_clinica(slug))
+    users = "".join(f"""<li style="margin-bottom:6px">{esc(u.get('nome') or '')} &lt;{esc(u['email'])}&gt;
+        <form method="post" action="/admin/clinicas/{slug}/usuario/remover" style="display:inline">
+        <input type="hidden" name="email" value="{esc(u['email'])}"><button class="btn sec peq">Remover acesso</button></form></li>"""
+        for u in usuarios_da_clinica(slug))
+    a = c.get("assinatura") or {}
+    alerta_apagar = ""
+    if a.get("preapproval_id") and situacao(c) == "ativa":
+        alerta_apagar += ("<p style='font-size:13px;color:#9b1c1c'>Esta clínica tem assinatura ativa no Mercado Pago. "
+                          "Apagar aqui não cancela a cobrança: cancele antes no Mercado Pago.</p>")
+    if zapi_configurada(c):
+        alerta_apagar += ("<p style='font-size:13px;color:#9b1c1c'>Esta clínica tem instância Z-API. Apagar aqui não "
+                          "apaga a instância: cancele na Z-API se não for mais usar.</p>")
     aviso = "".join(f'<div class="aviso">{esc(x)}</div>' for x in msg.split("||") if x)
     corpo = f"""<p style="margin-bottom:12px"><a href="/admin/clinicas">Todas as clínicas</a></p>{aviso}
     <div class="card"><h2>{esc(c['nome'])}</h2>
@@ -1223,8 +1236,61 @@ async def admin_clinica(slug: str, msg: str = "", admin: str = Depends(exigir_ad
       <div class="grid2"><div><label>Nome</label><input type="text" name="u_nome"></div>
         <div><label>E-mail</label><input type="email" name="u_email" required></div>
         <div><label>Senha (mínimo 8)</label><input type="text" name="u_senha" required minlength="8"></div></div>
-      <div style="margin-top:12px"><button class="btn sec">Salvar acesso</button></div></form>"""
+      <div style="margin-top:12px"><button class="btn sec">Salvar acesso</button></div></form>
+    <form method="post" action="/admin/clinicas/{slug}/apagar" class="card"><h2>Apagar cadastro</h2>
+      <p style="font-size:14px">Apaga a clínica, os acessos (e-mails de login), as conversas e os números dela. Não tem volta.
+      Depois disso o e-mail fica livre para criar a conta de novo.</p>{alerta_apagar}
+      <label>Para confirmar, digite o endereço da clínica: <span class="mono">{esc(slug)}</span></label>
+      <input type="text" name="confirmar" autocomplete="off" required>
+      <div style="margin-top:12px"><button class="btn sec">Apagar de vez</button></div></form>"""
     return html_resp(pagina(c["nome"], corpo))
+
+
+def apagar_usuario(email: str, slug: str):
+    email = email.strip().lower()
+    encerrar_sessoes(email)
+    R.delete(f"cl:usuario:{email}", f"cl:assinando:{email}")
+    R.srem(K(slug, "usuarios"), email)
+
+
+def apagar_clinica(slug: str):
+    c = obter_clinica(slug) or {}
+    for e in list(R.smembers(K(slug, "usuarios"))):
+        u = obter_usuario(e)
+        if not u or u.get("slug") == slug:
+            apagar_usuario(e, slug)
+    pid = (c.get("assinatura") or {}).get("preapproval_id")
+    if pid and R.get(f"cl:preapproval:{pid}") == slug:
+        R.delete(f"cl:preapproval:{pid}")
+    chaves = list(R.scan_iter(match=K(slug, "*"), count=500))
+    for i in range(0, len(chaves), 500):
+        R.delete(*chaves[i:i + 500])
+    R.delete(K(slug, "cfg"))
+    R.srem("cl:index", slug)
+
+
+@router.post("/admin/clinicas/{slug}/apagar")
+async def admin_clinica_apagar(slug: str, request: Request, admin: str = Depends(exigir_admin)):
+    c = obter_clinica(slug)
+    if not c:
+        raise HTTPException(status_code=404)
+    f = await request.form()
+    if str(f.get("confirmar", "")).strip() != slug:
+        return RedirectResponse(f"/admin/clinicas/{slug}?msg=Nao+apagado:+o+endereco+digitado+nao+confere.", status_code=303)
+    apagar_clinica(slug)
+    print(f"admin {admin} apagou a clinica {slug}")
+    return RedirectResponse("/admin/clinicas?msg=" + quote(f"Cadastro {c.get('nome', slug)} apagado."), status_code=303)
+
+
+@router.post("/admin/clinicas/{slug}/usuario/remover")
+async def admin_usuario_remover(slug: str, request: Request, admin: str = Depends(exigir_admin)):
+    f = await request.form()
+    email = str(f.get("email", "")).strip().lower()
+    u = obter_usuario(email)
+    if not u or u.get("slug") != slug:
+        return RedirectResponse(f"/admin/clinicas/{slug}?msg=Acesso+nao+encontrado.", status_code=303)
+    apagar_usuario(email, slug)
+    return RedirectResponse(f"/admin/clinicas/{slug}?msg=" + quote(f"Acesso {email} removido."), status_code=303)
 
 
 @router.post("/admin/clinicas/{slug}")
@@ -1400,6 +1466,11 @@ def html_admin_plano() -> str:
     p = obter_plano()
     falta = "" if MP_TOKEN else ('<div class="aviso erro">Falta a variável CLINICA_MP_ACCESS_TOKEN (ou MP_ACCESS_TOKEN) '
                                  'no Railway. Sem ela ninguém consegue pagar.</div>')
+    if MP_TOKEN.startswith("TEST-"):
+        falta += ('<div class="aviso erro">O token do Mercado Pago é de teste (começa com TEST-). Para assinatura o Mercado Pago '
+                  'não aceita esse token: o link de pagamento abre uma página que não existe. Para testar, use o Access Token '
+                  'de produção (APP_USR-) de um <b>vendedor de teste</b> e pague logado com o <b>comprador de teste</b>. '
+                  'Para cobrar de verdade, use o Access Token de produção da conta de vocês.</div>')
     return f"""<form method="post" action="/admin/plano" class="card"><h2>Plano (o que a clínica paga ao criar a conta)</h2>{falta}
       <div class="grid2"><div><label>Nome que aparece no Mercado Pago</label><input type="text" name="nome" value="{esc(p.get('nome', ''))}"></div>
       <div><label>Mensalidade em R$ (tudo incluído)</label><input type="text" name="valor" value="{esc(p.get('valor', ''))}" placeholder="ex.: 497"></div></div>
@@ -1720,6 +1791,7 @@ async def garantir_plano_mp() -> tuple[dict | None, str]:
     p.update({"mp_plan_id": d["id"], "mp_valor": v, "mp_init_point": d.get("init_point")
               or f"https://www.mercadopago.com.br/subscriptions/checkout?preapproval_plan_id={d['id']}"})
     R.set("cl:plano", json.dumps(p))
+    print(f"MP plano criado {d['id']} init_point={p['mp_init_point']}")
     return p, ""
 
 
