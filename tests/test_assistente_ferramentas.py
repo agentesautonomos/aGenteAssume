@@ -46,6 +46,18 @@ def test_periodo_tarde(ferramenta):
     assert "14:00" in r and "09:00" not in r
 
 
+def test_periodo_errado_nao_esconde_horario_do_dia(ferramenta):
+    # a IA pediu "noite" para 17h: a ferramenta mostra o dia todo em vez de dizer que nao tem
+    r = ferramenta("ver_horarios_livres", profissional="Dra. Ana Souza", data_inicial="2026-11-26", dias=1, periodo="noite")
+    assert "Sem horário" not in r and "17:00" in r
+
+
+def test_sem_horario_ja_traz_proximas_opcoes(ferramenta, relogio):
+    relogio.ajustar(datetime(2026, 12, 20, 13, 0, tzinfo=timezone.utc))
+    r = ferramenta("ver_horarios_livres", profissional="Dra. Ana Souza", data_inicial="2026-12-25", dias=1)
+    assert "feriado" in r.lower() and "Próximos horários livres" in r
+
+
 # ---------- motivo certo quando nao ha horario ----------
 def test_alem_da_janela_nao_diz_que_o_profissional_nao_atende(ferramenta):
     r = ferramenta("ver_horarios_livres", profissional="Dra. Ana Souza", data_inicial="2027-01-20", dias=3)

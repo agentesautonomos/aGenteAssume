@@ -479,7 +479,10 @@ def montar_prompt(c: dict, conf: dict) -> str:
             "Se o profissional que ele quer não atende nesse dia, diga isso e ofereça os dias em que ele atende "
             "ou outro profissional que atende no dia pedido.",
             "Ofereça duas ou três opções de horário de cada vez, com dia da semana, data e hora (ex.: quarta 26/11 às 9h), "
-            "de preferência no dia e período que o paciente pediu. Se não houver, ofereça o mais próximo.",
+            "de preferência no dia e período que o paciente pediu. Se não houver, ofereça o mais próximo. "
+            "Nunca responda só que \"tem horários\" ou \"posso ver outro dia?\": cite sempre as opções concretas.",
+            "Se o paciente já disse o profissional, o dia e a hora, e esse horário está livre, e você já sabe o nome dele "
+            "e se é particular ou convênio, marque direto com marcar_consulta, sem perguntar mais nada (o motivo da consulta é opcional).",
             "Antes de marcar, tenha o nome do paciente e saiba se é particular ou convênio (qual). "
             "Se for convênio, confira se o profissional atende esse convênio (veja os convênios de cada um acima); "
             "se não atender, diga isso e ofereça particular ou outro profissional que atenda o convênio. "
@@ -616,7 +619,8 @@ def ferramentas_agenda(conf: dict) -> list:
              "data_inicial": {"type": "string", "description": "Primeiro dia a olhar, AAAA-MM-DD. Se não souber, deixe vazio (hoje)."},
              "dias": {"type": "integer", "description": "Quantos dias olhar a partir da data inicial (1 a 14). Padrão 7."},
              "periodo": {"type": "string", "enum": ["manha", "tarde", "noite", "qualquer"],
-                         "description": "Período que o paciente prefere. Padrão qualquer."}},
+                         "description": "Período que o paciente prefere: manha = antes das 12h, tarde = de 12h às 18h, "
+                                        "noite = a partir das 18h. Se o paciente pediu uma hora exata, use qualquer. Padrão qualquer."}},
              "required": []}},
         {"name": "marcar_consulta",
          "description": "Marca a consulta na agenda da clínica, num horário que apareceu como livre e que o paciente escolheu.",
@@ -692,7 +696,12 @@ def _sem_horario(slug: str, conf: dict, prof: dict, ini, dias: int, sim: bool, p
            + "; ".join(partes) + f". {prof['nome']} atende: {AG.resumo_semana(prof)}.")
     if any("não atende às" in m for _, _, m in motivos):
         txt += f" Não ofereça {prof['nome']} em dia da semana em que ele não atende."
-    return txt + " Explique o motivo certo ao paciente e ofereça outros dias ou outro profissional."
+    prox = AG.livres(slug, conf, prof, max(ini + timedelta(days=dias), agora().date()), 14, sim)
+    if prox:
+        txt += " Próximos horários livres de " + prof["nome"] + ": " + "; ".join(
+            f"{AG.DIAS_CURTOS[d.weekday()]} {d.strftime('%d/%m')} ({d.isoformat()}): " + ", ".join(hs[:8])
+            for d, hs in list(prox.items())[:3]) + "."
+    return txt + " Explique o motivo certo ao paciente e já ofereça duas ou três dessas opções concretas (ou outro profissional)."
 
 
 def executar_ferramenta(nome: str, ent: dict, ctx: dict) -> str:
@@ -729,6 +738,12 @@ def executar_ferramenta(nome: str, ent: dict, ctx: dict) -> str:
             else:
                 mostra = ", ".join(hs)
             linhas.append(f"{AG.DIAS_CURTOS[d.weekday()]} {d.strftime('%d/%m')} ({d.isoformat()}): " + mostra)
+        if not linhas and res:
+            # nada no periodo pedido, mas o dia tem horario: mostra o dia todo (a IA as vezes erra o periodo)
+            linhas = [f"Nenhum horário no período pedido (manhã = antes das 12h, tarde = 12h às 18h, noite = a partir das 18h). "
+                      "Horários livres nesses dias:"]
+            linhas += [f"{AG.DIAS_CURTOS[d.weekday()]} {d.strftime('%d/%m')} ({d.isoformat()}): " + ", ".join(hs)
+                       for d, hs in res.items()]
         if not linhas:
             periodo = ent.get("periodo") if ent.get("periodo") not in (None, "", "qualquer") else ""
             return _sem_horario(slug, conf, prof, ini, dias, sim, periodo)
