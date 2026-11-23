@@ -137,6 +137,44 @@ def grade(prof: dict, dia: date) -> list:
     return out
 
 
+# ============================================================
+# FERIADOS NACIONAIS
+# ============================================================
+FERIADOS_FIXOS = {(1, 1): "Confraternização Universal", (4, 21): "Tiradentes", (5, 1): "Dia do Trabalho",
+                  (9, 7): "Independência", (10, 12): "Nossa Senhora Aparecida", (11, 2): "Finados",
+                  (11, 15): "Proclamação da República", (11, 20): "Consciência Negra", (12, 25): "Natal"}
+
+
+def _pascoa(ano: int) -> date:
+    a, b, c = ano % 19, ano // 100, ano % 100
+    d, e = b // 4, b % 4
+    f = (b + 8) // 25
+    g = (b - f + 1) // 3
+    h = (19 * a + b - d - g + 15) % 30
+    i, k = c // 4, c % 4
+    l = (32 + 2 * e + 2 * i - h - k) % 7
+    m = (a + 11 * h + 22 * l) // 451
+    mes = (h + l - 7 * m + 114) // 31
+    dia = ((h + l - 7 * m + 114) % 31) + 1
+    return date(ano, mes, dia)
+
+
+def feriado(dia: date) -> str:
+    """Nome do feriado nacional nesse dia, ou ''. (Feriados estaduais e municipais: a clinica bloqueia na agenda.)"""
+    if (dia.month, dia.day) in FERIADOS_FIXOS:
+        return FERIADOS_FIXOS[(dia.month, dia.day)]
+    if dia == _pascoa(dia.year) - timedelta(days=2):
+        return "Sexta-feira Santa"
+    return ""
+
+
+def fecha_no_feriado(conf: dict, dia: date) -> str:
+    """Nome do feriado se a clinica nao atende nesse dia por ser feriado nacional; senao ''."""
+    if str(conf.get("atende_feriados") or "") in ("1", "true", "True", "sim"):
+        return ""
+    return feriado(dia)
+
+
 def achar_prof(conf: dict, ref: str) -> dict | None:
     """Acha o profissional pelo id ou pelo nome (sem diferenciar maiusculas)."""
     ref = (ref or "").strip()
@@ -228,7 +266,7 @@ def livres_no_dia(slug: str, conf: dict, prof: dict, dia: date, sim: bool = Fals
     """Horarios livres (HH:MM) do profissional no dia."""
     agora = agora_local()
     ant, jan = regras(conf)
-    if respeitar_regras and (dia > agora.date() + timedelta(days=jan)):
+    if respeitar_regras and (dia > agora.date() + timedelta(days=jan) or fecha_no_feriado(conf, dia)):
         return []
     limite = agora + timedelta(hours=ant if respeitar_regras else 0)
     dur = duracao(prof)
@@ -251,6 +289,28 @@ def livres(slug: str, conf: dict, prof: dict, ini: date, dias: int, sim: bool = 
         if hs:
             out[d] = hs
     return out
+
+
+def motivo_sem_horario(slug: str, conf: dict, prof: dict, dia: date, sim: bool = False) -> str:
+    """Por que nao ha horario livre do profissional nesse dia (para o assistente explicar certo ao paciente)."""
+    agora = agora_local()
+    ant, jan = regras(conf)
+    nome = prof.get("nome", "")
+    if dia < agora.date():
+        return "dia que já passou"
+    if not intervalos_do_dia(prof, dia.weekday()):
+        return f"{nome} não atende às {DIAS_LONGOS[dia.weekday()].split('-')[0]}s"
+    if fecha_no_feriado(conf, dia):
+        return f"feriado ({feriado(dia)}), a clínica não atende"
+    if dia > agora.date() + timedelta(days=jan):
+        return (f"a agenda só marca até {jan} dias à frente (até {(agora.date() + timedelta(days=jan)).strftime('%d/%m')}); "
+                f"nesse dia {nome} atende, mas a marcação ainda não está aberta")
+    bloqueios = [x for x in listar(slug, dia, dia, sim) if x.get("tipo") == "bloqueio" and x.get("prof_id") in ("", prof.get("id"))]
+    if bloqueios and not livres_no_dia(slug, conf, prof, dia, sim, respeitar_regras=False):
+        return "agenda bloqueada pela clínica nesse dia" + (f" ({bloqueios[0].get('motivo')})" if bloqueios[0].get("motivo") else "")
+    if dia == agora.date() and livres_no_dia(slug, conf, prof, dia, sim, respeitar_regras=False):
+        return f"os horários livres de hoje começam em menos de {ant}h (antecedência mínima)"
+    return "todos os horários desse dia já estão ocupados"
 
 
 @contextmanager
