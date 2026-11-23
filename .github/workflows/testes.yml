@@ -36,7 +36,12 @@ jobs:
       - name: Conversas
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-        run: pytest -m ia -v -rA
+        run: |
+          if [ -z "$ANTHROPIC_API_KEY" ]; then
+            echo "::error::O secret ANTHROPIC_API_KEY não chegou ao teste. Cadastre em Settings > Secrets and variables > Actions > aba Secrets > Repository secrets, com esse nome exato."
+            exit 1
+          fi
+          pytest -m ia -v -rA
       - name: Guardar o relatório
         if: always()
         uses: actions/upload-artifact@v4
