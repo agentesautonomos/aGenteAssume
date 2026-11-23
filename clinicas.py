@@ -223,8 +223,6 @@ def exigir_login(request: Request) -> dict:
     s = sessao_atual(request)
     if not s:
         raise HTTPException(status_code=303, headers={"Location": "/entrar"})
-    if situacao(s["clinica"]) != "ativa" and not request.url.path.startswith(("/assinar", "/painel/senha")):
-        raise HTTPException(status_code=303, headers={"Location": "/assinar"})
     return s
 
 
@@ -857,21 +855,20 @@ def html_lista_conversas(slug: str, ini: int, fim: int) -> str:
 @router.get("/painel", response_class=HTMLResponse)
 async def painel(request: Request, p: int = 7, msg: str = "", s: dict = Depends(exigir_login)):
     c = await reverificar_assinatura(s["clinica"])
-    if situacao(c) != "ativa":
-        return RedirectResponse("/assinar", status_code=303)
     slug = c["slug"]
     p = p if p in (1, 7, 30) else 7
-    st = await status_conexao(c)
+    st = await status_conexao(c) if situacao(c) == "ativa" else {
+        "estado": "sem_config", "detalhe": "Assim que você assinar, a gente prepara o número da sua clínica (em até 24 horas)."}
     est = estatisticas(slug, p)
     ponto = {"conectado": "p-ok", "desconectado": "p-mal", "erro": "p-mal"}.get(st["estado"], "p-off")
     titulo_con = {"conectado": "Conectado", "desconectado": "Desconectado",
-                  "erro": "Sem resposta", "sem_config": "Em preparação"}[st["estado"]]
+                  "erro": "Sem resposta", "sem_config": "Em preparação" if situacao(c) == "ativa" else "Aguardando assinatura"}[st["estado"]]
     ligado = bool(c.get("bot_ativo"))
     aviso = f'<div class="aviso">{esc(msg)}</div>' if msg else ""
     periodos = "".join(f'<a href="/painel?p={d}" class="{"ativo" if d == p else ""}">{t}</a>'
                        for d, t in ((1, "Hoje"), (7, "7 dias"), (30, "30 dias")))
     n_fila = R.zcard(K(slug, "fila"))
-    corpo = f"""{aviso}
+    corpo = f"""{aviso}{html_faixa_assinatura(c)}
     <div class="status">
       <div class="card"><h2>WhatsApp da clínica</h2>
         <div class="linha"><span class="ponto {ponto}"></span><b>{titulo_con}</b></div>
@@ -901,6 +898,8 @@ async def painel(request: Request, p: int = 7, msg: str = "", s: dict = Depends(
 @router.post("/painel/assistente")
 def painel_assistente(ligar: str = Form("0"), s: dict = Depends(exigir_login)):
     c = obter_clinica(s["clinica"]["slug"])
+    if ligar == "1" and situacao(c) != "ativa":
+        return RedirectResponse("/painel?msg=Para+ligar+o+assistente,+assine+primeiro.", status_code=303)
     c["bot_ativo"] = ligar == "1"
     salvar_clinica(c)
     m = "Assistente ligado." if c["bot_ativo"] else "Assistente desligado. As mensagens continuam chegando aqui, mas ninguém responde automaticamente."
@@ -1154,6 +1153,7 @@ async def admin_clinicas(msg: str = "", admin: str = Depends(exigir_admin)):
               + "".join(linhas) + "</table>") if linhas else '<div class="vazio">Nenhuma clínica ainda.</div>'
     aviso = f'<div class="aviso">{esc(msg)}</div>' if msg else ""
     corpo = f"""<p style="margin-bottom:12px"><a href="/admin">Painel admin</a></p>{aviso}
+    {html_leads()}
     <div class="card"><h2>Clínicas</h2>{tabela}</div>
     {html_admin_plano()}
     <form method="post" action="/admin/clinicas/nova" class="card"><h2>Nova clínica (cadastro feito por vocês, sem pagamento)</h2>
@@ -1403,7 +1403,8 @@ def html_admin_plano() -> str:
     return f"""<form method="post" action="/admin/plano" class="card"><h2>Plano (o que a clínica paga ao criar a conta)</h2>{falta}
       <div class="grid2"><div><label>Nome que aparece no Mercado Pago</label><input type="text" name="nome" value="{esc(p.get('nome', ''))}"></div>
       <div><label>Mensalidade em R$ (tudo incluído)</label><input type="text" name="valor" value="{esc(p.get('valor', ''))}" placeholder="ex.: 497"></div></div>
-      <p style="font-size:13px;color:var(--txt2);margin-top:8px">Vale para as próximas assinaturas. Quem já assinou continua no valor que assinou.</p>
+      <p style="font-size:13px;color:var(--txt2);margin-top:8px">Vale para as próximas assinaturas. Quem já assinou continua no valor que assinou.
+      {('Plano no Mercado Pago: <span class="mono">' + esc(p.get('mp_plan_id', '')) + '</span>') if p.get('mp_plan_id') else 'Ainda não criado no Mercado Pago.'}</p>
       <div style="margin-top:10px"><button class="btn sec">Salvar plano</button></div></form>"""
 
 
@@ -1411,8 +1412,10 @@ def html_admin_plano() -> str:
 async def admin_plano(request: Request, admin: str = Depends(exigir_admin)):
     f = await request.form()
     R.set("cl:plano", json.dumps({"nome": str(f.get("nome", "")).strip()[:120] or "a gente assume",
-                                  "valor": str(f.get("valor", "")).strip().replace("R$", "").strip()}))
-    return RedirectResponse("/admin/clinicas?msg=Plano+salvo.", status_code=303)
+                                  "valor": str(f.get("valor", "")).strip().replace("R$", "").replace(",", ".").strip()}))
+    plano, erro = await garantir_plano_mp()
+    msg = f"Plano salvo e criado no Mercado Pago ({plano['mp_plan_id']})." if plano else f"Plano salvo, mas: {erro}"
+    return RedirectResponse("/admin/clinicas?msg=" + quote(msg), status_code=303)
 
 
 # ---------- telas publicas: criar conta, esqueci, redefinir ----------
@@ -1444,14 +1447,14 @@ def criar_conta_get(request: Request, erro: str = ""):
       <label>WhatsApp para avisos da equipe</label><input type="tel" name="whatsapp" required placeholder="(51) 99999-8888">
       <label>E-mail</label><input type="email" name="email" required autocomplete="username">
       <label>Senha (mínimo 8 caracteres)</label><input type="password" name="senha" required minlength="8" autocomplete="new-password">
-      <div style="margin-top:16px"><button class="btn" style="width:100%">Continuar para o pagamento</button></div>
+      <div style="margin-top:16px"><button class="btn" style="width:100%">Criar conta</button></div>
     </form>
     <p style="font-size:14px">Já tem conta? <a href="/entrar">Entrar</a></p>"""
-    return tela_publica("Criar conta", f"{preco}Depois do pagamento, a gente prepara o WhatsApp da sua clínica em até 24 horas.", miolo, erro)
+    return tela_publica("Criar conta", f"{preco}Crie a conta, conheça o painel e assine quando quiser ligar o assistente.", miolo, erro)
 
 
 @router.post("/criar-conta")
-def criar_conta_post(request: Request, clinica: str = Form(""), nome: str = Form(""), whatsapp: str = Form(""),
+async def criar_conta_post(request: Request, clinica: str = Form(""), nome: str = Form(""), whatsapp: str = Form(""),
                      email: str = Form(""), senha: str = Form("")):
     email = email.strip().lower()
     clinica = clinica.strip()[:120]
@@ -1477,7 +1480,12 @@ def criar_conta_post(request: Request, clinica: str = Form(""), nome: str = Form
                     "criado_em": agora().isoformat(timespec="seconds"), "situacao": "pendente",
                     "recepcao_tel": so_digitos(whatsapp), "origem": "cadastro"})
     salvar_usuario({"email": email, "nome": nome.strip()[:80], "slug": slug, "hash": hash_senha(senha)})
-    resp = RedirectResponse("/assinar", status_code=303)
+    tarefa = asyncio.create_task(avisar_equipe_aga(
+        f"Cadastro novo (ainda não assinou): {clinica}\nContato: {nome.strip()} / {email} / {fmt_tel(whatsapp)}\n"
+        f"{BASE_URL}/admin/clinicas/{slug}", "Cadastro novo na plataforma"))
+    _tarefas.add(tarefa)
+    tarefa.add_done_callback(_tarefas.discard)
+    resp = RedirectResponse("/painel?msg=Conta+criada.+Bem-vindo!", status_code=303)
     resp.set_cookie(COOKIE, criar_sessao(email), max_age=SESSAO_DIAS * 86400, httponly=True,
                     secure=BASE_URL.startswith("https"), samesite="lax")
     return resp
@@ -1565,6 +1573,8 @@ async def aplicar_assinatura(slug: str, dados: dict) -> dict | None:
               "proximo_debito": dados.get("next_payment_date", ""),
               "valor": (dados.get("auto_recurring") or {}).get("transaction_amount", a.get("valor"))})
     c["assinatura"] = a
+    if a.get("preapproval_id"):
+        R.set(f"cl:preapproval:{a['preapproval_id']}", slug)
     antes = situacao(c)
     if status_mp == "authorized":
         c["situacao"] = "ativa"
@@ -1654,31 +1664,96 @@ async def tratar_webhook_mp(tipo: str, id_mp: str) -> bool:
     if not MP_TOKEN or not id_mp:
         return False
     try:
+        pid = None
         if "preapproval" in tipo or "subscription" in tipo:
-            code, d = await mp("GET", f"/preapproval/{id_mp}")
-            if code != 200 and "authorized_payment" in tipo:
+            pid = id_mp
+            if "authorized_payment" in tipo:
                 code, d = await mp("GET", f"/authorized_payments/{id_mp}")
-                if code == 200 and d.get("preapproval_id"):
-                    code, d = await mp("GET", f"/preapproval/{d['preapproval_id']}")
+                pid = d.get("preapproval_id") if code == 200 else None
         elif "payment" in tipo:
             code, d = await mp("GET", f"/v1/payments/{id_mp}")
-            pid = (d.get("metadata") or {}).get("preapproval_id") or d.get("preapproval_id") if code == 200 else None
-            if not str(d.get("external_reference", "")).startswith("clinica:"):
+            if code != 200:
                 return False
-            if pid:
-                code, d = await mp("GET", f"/preapproval/{pid}")
-            else:
-                return True
-        else:
+            pid = (d.get("metadata") or {}).get("preapproval_id") or d.get("preapproval_id")
+            ref = str(d.get("external_reference", ""))
+            if not pid:
+                return ref.startswith("clinica:")
+        if not pid:
             return False
-        ref = str(d.get("external_reference", "")) if code == 200 else ""
-        if not ref.startswith("clinica:"):
+        code, d = await mp("GET", f"/preapproval/{pid}")
+        if code != 200:
             return False
-        await aplicar_assinatura(ref.split(":", 1)[1], d)
+        slug = slug_da_assinatura(d)
+        if not slug:
+            return False
+        await aplicar_assinatura(slug, d)
         return True
     except Exception as e:
         print(f"MP webhook clinica erro: {e}")
         return False
+
+
+def slug_da_assinatura(d: dict) -> str | None:
+    """Descobre de qual clinica e uma assinatura do MP: pela referencia ou pelo vinculo salvo na volta do pagamento."""
+    ref = str(d.get("external_reference") or "")
+    if ref.startswith("clinica:"):
+        return ref.split(":", 1)[1]
+    return R.get(f"cl:preapproval:{d.get('id')}")
+
+
+async def garantir_plano_mp() -> tuple[dict | None, str]:
+    """Cria (ou reaproveita) o plano de assinatura no MP para o valor atual. Devolve (plano, erro)."""
+    p = obter_plano()
+    v = valor_plano()
+    if not v:
+        return None, "Defina o valor da mensalidade."
+    if not MP_TOKEN:
+        return None, "Falta o token do Mercado Pago."
+    if p.get("mp_plan_id") and p.get("mp_valor") == v and p.get("mp_init_point"):
+        return p, ""
+    corpo = {"reason": p.get("nome") or "a gente assume", "back_url": f"{BASE_URL}/assinar/retorno",
+             "auto_recurring": {"frequency": 1, "frequency_type": "months", "transaction_amount": v, "currency_id": "BRL"}}
+    code, d = await mp("POST", "/preapproval_plan", corpo)
+    if code >= 300 or not d.get("id"):
+        print(f"MP criar plano: {code} {str(d)[:400]}")
+        return None, f"Mercado Pago recusou criar o plano ({code}: {d.get('message', '')})"
+    p.update({"mp_plan_id": d["id"], "mp_valor": v, "mp_init_point": d.get("init_point")
+              or f"https://www.mercadopago.com.br/subscriptions/checkout?preapproval_plan_id={d['id']}"})
+    R.set("cl:plano", json.dumps(p))
+    return p, ""
+
+
+def html_leads() -> str:
+    linhas = []
+    for c in sorted(listar_clinicas(), key=lambda x: x.get("criado_em", ""), reverse=True):
+        if situacao(c) == "ativa" or c.get("desativada"):
+            continue
+        us = usuarios_da_clinica(c["slug"])
+        contato = ", ".join(f"{esc(u.get('nome') or '')} &lt;{esc(u['email'])}&gt;" for u in us)
+        tel = so_digitos(c.get("recepcao_tel", ""))
+        wa = f'<a href="https://wa.me/{tel_envio(tel)}" target="_blank" rel="noopener">{fmt_tel(tel)}</a>' if tel else ""
+        linhas.append(f"""<tr><td><a href="/admin/clinicas/{c['slug']}">{esc(c['nome'])}</a></td><td>{contato}<br>{wa}</td>
+          <td>{esc(rotulo_situacao(c))}</td><td>{ha_quanto(c.get('criado_em', ''))}</td></tr>""")
+    if not linhas:
+        return ""
+    return ('<div class="card"><h2>Cadastros sem assinatura (leads)</h2><table><tr><th>Clínica</th><th>Contato</th>'
+            '<th>Situação</th><th>Cadastro</th></tr>' + "".join(linhas) + "</table></div>")
+
+
+def html_faixa_assinatura(c: dict) -> str:
+    sit = situacao(c)
+    if sit == "ativa":
+        return ""
+    v = valor_plano()
+    preco = f" por {fmt_reais(v)} por mês, tudo incluído" if v else ""
+    if sit == "bloqueada":
+        txt = "O pagamento da sua assinatura parou. O assistente está desligado até você assinar de novo."
+    else:
+        txt = (f"Sua conta está criada. Para a gente ligar o WhatsApp da sua clínica e o assistente começar a responder, "
+               f"falta assinar{preco}.")
+    return (f'<div class="card" style="border-color:var(--lilas);background:var(--lilas2)"><h2>Falta assinar</h2>'
+            f'<p style="font-size:14px;margin-bottom:12px">{txt}</p>'
+            f'<a class="btn" href="/assinar">Assinar agora</a></div>')
 
 
 @router.get("/assinar", response_class=HTMLResponse)
@@ -1687,39 +1762,34 @@ async def assinar(request: Request, erro: str = "", s: dict = Depends(exigir_log
     if situacao(c) == "ativa":
         return RedirectResponse("/painel", status_code=303)
     v = valor_plano()
-    bloqueada = situacao(c) == "bloqueada"
     if not v or not MP_TOKEN:
         miolo = '<div class="card"><p>O pagamento ainda não está disponível. A gente avisa você pelo WhatsApp.</p></div>'
     else:
         miolo = f"""<div class="card">
           <p class="mono" style="font-size:28px;font-weight:600">{fmt_reais(v)}<span style="font-size:14px;color:var(--txt2)"> por mês</span></p>
           <p style="color:var(--txt2);font-size:14px;margin:6px 0 14px">Tudo incluído: o assistente no WhatsApp da clínica, o painel e o número.
-          Cobrança mensal no cartão pelo Mercado Pago. Você cancela quando quiser.</p>
+          Cobrança mensal pelo Mercado Pago. Você cancela quando quiser.</p>
           <form method="post" action="/assinar"><button class="btn" style="width:100%">Pagar com Mercado Pago</button></form></div>"""
-    sub = ("O pagamento da sua assinatura parou. Para voltar a usar, assine de novo." if bloqueada
-           else f"Falta só o pagamento para liberar o painel da {esc(c['nome'])}.")
-    miolo += '<p style="font-size:14px"><a href="/sair">Sair</a></p>'
+    sub = ("O pagamento da sua assinatura parou. Para voltar a usar, assine de novo." if situacao(c) == "bloqueada"
+           else f"Assine para ligar o assistente da {esc(c['nome'])}.")
+    miolo += '<p style="font-size:14px"><a href="/painel">Voltar ao painel</a></p>'
     return tela_publica("Assinatura", sub, miolo, erro)
 
 
 @router.post("/assinar")
 async def assinar_post(s: dict = Depends(exigir_login)):
     c = s["clinica"]
-    v = valor_plano()
-    if not v or not MP_TOKEN:
-        return RedirectResponse("/assinar", status_code=303)
-    corpo = {"reason": obter_plano().get("nome") or "a gente assume", "external_reference": f"clinica:{c['slug']}",
-             "payer_email": s["usuario"]["email"], "back_url": f"{BASE_URL}/assinar/retorno", "status": "pending",
-             "auto_recurring": {"frequency": 1, "frequency_type": "months", "transaction_amount": v, "currency_id": "BRL"}}
-    code, d = await mp("POST", "/preapproval", corpo)
-    if code >= 300 or not d.get("init_point"):
-        print(f"MP criar assinatura {c['slug']}: {code} {str(d)[:300]}")
+    plano, erro = await garantir_plano_mp()
+    if not plano:
+        print(f"MP assinar {c['slug']}: {erro}")
         return RedirectResponse("/assinar?erro=Nao+deu+para+abrir+o+pagamento.+Tente+de+novo+em+instantes.", status_code=303)
     c = obter_clinica(c["slug"])
-    c["assinatura"] = {"preapproval_id": d["id"], "status_mp": d.get("status", "pending"), "valor": v,
-                       "verificado_em": agora().isoformat(timespec="seconds")}
+    c["assinatura"] = {**(c.get("assinatura") or {}), "iniciada_em": agora().isoformat(timespec="seconds"),
+                       "valor": plano["mp_valor"], "plano_id": plano["mp_plan_id"]}
     salvar_clinica(c)
-    return RedirectResponse(d["init_point"], status_code=303)
+    R.set(f"cl:assinando:{s['usuario']['email']}", c["slug"], ex=86400)
+    sep = "&" if "?" in plano["mp_init_point"] else "?"
+    return RedirectResponse(f"{plano['mp_init_point']}{sep}external_reference={quote('clinica:' + c['slug'])}", status_code=303)
 
 
 @router.get("/assinar/retorno")
@@ -1728,14 +1798,23 @@ async def assinar_retorno(request: Request, preapproval_id: str = ""):
     if not s:
         return RedirectResponse("/entrar", status_code=303)
     c = s["clinica"]
-    pid = preapproval_id or (c.get("assinatura") or {}).get("preapproval_id")
-    if pid and MP_TOKEN:
-        code, d = await mp("GET", f"/preapproval/{pid}")
-        if code == 200 and d.get("external_reference") == f"clinica:{c['slug']}":
-            c = await aplicar_assinatura(c["slug"], d) or c
+    if preapproval_id and MP_TOKEN:
+        code, d = await mp("GET", f"/preapproval/{preapproval_id}")
+        if code == 200:
+            slug = slug_da_assinatura(d)
+            plano = obter_plano()
+            if not slug and d.get("preapproval_plan_id") and d.get("preapproval_plan_id") == plano.get("mp_plan_id"):
+                slug = c["slug"]      # sem referencia: vincula a quem esta logado e acabou de pagar
+            if slug == c["slug"]:
+                R.set(f"cl:preapproval:{preapproval_id}", slug)
+                c = await aplicar_assinatura(slug, d) or c
+            else:
+                print(f"MP retorno: preapproval {preapproval_id} de outra clinica ({slug}), sessao {c['slug']}")
+        else:
+            print(f"MP retorno {preapproval_id}: {code} {str(d)[:300]}")
     if situacao(c) == "ativa":
         return RedirectResponse("/painel?msg=Pagamento+confirmado.+Bem-vindo!", status_code=303)
-    return RedirectResponse("/assinar?erro=O+pagamento+ainda+nao+foi+confirmado.+Se+voce+acabou+de+pagar,+atualize+em+1+minuto.",
+    return RedirectResponse("/painel?msg=O+pagamento+ainda+nao+foi+confirmado.+Se+voce+acabou+de+pagar,+atualize+em+1+minuto.",
                             status_code=303)
 
 
@@ -1743,6 +1822,8 @@ async def assinar_retorno(request: Request, preapproval_id: str = ""):
 @router.get("/painel/whatsapp", response_class=HTMLResponse)
 async def painel_whatsapp(s: dict = Depends(exigir_login)):
     c = s["clinica"]
+    if situacao(c) != "ativa":
+        return RedirectResponse("/assinar", status_code=303)
     R.delete(K(c["slug"], "zapi_status"))
     st = await status_conexao(c)
     if st["estado"] == "conectado":
