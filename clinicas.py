@@ -16,7 +16,8 @@ Rotas:
   /painel                           dashboard (conexao, contadores, fila, ultimas conversas)
   /painel/conversas                 todas as conversas
   /painel/conversa/{tel}            uma conversa, com assumir / devolver
-  /painel/agendamentos              pedidos de agendamento que o assistente anotou
+  /painel/agenda                    agenda propria (dia/semana): o assistente marca; a equipe marca, move, cancela, bloqueia
+  /painel/agendamentos              pedidos que o assistente anotou (profissionais sem horarios na agenda)
   /painel/configuracoes             profissionais, horarios, convenios -> prompt
   /painel/senha                     trocar a senha
   /admin/clinicas                   (admin da a gente assume) cadastrar e editar clinicas
@@ -32,9 +33,11 @@ import asyncio
 import hashlib
 import secrets
 from datetime import datetime, timedelta, timezone
+from urllib.parse import quote
 
 import httpx
 import redis
+import agenda as AG
 from anthropic import Anthropic
 from fastapi import APIRouter, Request, Depends, HTTPException, Form
 from fastapi.responses import HTMLResponse, RedirectResponse
@@ -418,6 +421,12 @@ def obter_conf(slug: str) -> dict:
     v = R.get(K(slug, "conf"))
     d = json.loads(v) if v else {}
     d.setdefault("profissionais", [])
+    # cada profissional tem um id fixo (a agenda usa o id; o nome pode mudar)
+    sem_id = [x for x in d["profissionais"] if not x.get("id")]
+    for x in sem_id:
+        x["id"] = secrets.token_hex(4)
+    if sem_id and v:
+        salvar_conf(slug, d)
     return d
 
 
@@ -445,17 +454,42 @@ def montar_prompt(c: dict, conf: dict) -> str:
         if conf.get(ch):
             p.append(f"{rot}: {conf[ch]}")
     profs = [x for x in conf.get("profissionais", []) if x.get("nome")]
+    com_agenda = AG.profs_com_agenda(conf)
     if profs:
         p += ["", "=== PROFISSIONAIS ==="]
         for x in profs:
             p.append(f"- {x['nome']}")
+            if AG.tem_agenda(x):
+                p.append(f"  Atende (agenda): {AG.resumo_semana(x)}")
             for rot, ch in (("Especialidades", "especialidades"), ("Dias e horários de atendimento", "horarios"),
                             ("Convênios", "convenios"), ("Observações", "obs")):
                 if x.get(ch):
                     p.append(f"  {rot}: {x[ch]}")
     if conf.get("extra"):
         p += ["", "=== OUTRAS INFORMAÇÕES E REGRAS DA CLÍNICA ===", conf["extra"]]
-    p += [
+    if com_agenda:
+        nomes = ", ".join(x["nome"] for x in com_agenda)
+        p += [
+            "",
+            "=== AGENDAMENTO (você tem acesso à agenda da clínica) ===",
+            f"Você marca consultas de verdade na agenda para: {nomes}.",
+            "Nunca invente nem prometa um horário: antes de oferecer, consulte com a ferramenta ver_horarios_livres.",
+            "Ofereça duas ou três opções de horário de cada vez, com dia da semana, data e hora (ex.: quarta 26/11 às 9h), "
+            "de preferência no dia e período que o paciente pediu. Se não houver, ofereça o mais próximo.",
+            "Antes de marcar, tenha o nome do paciente e saiba se é particular ou convênio (qual). "
+            "Quando o paciente escolher um dos horários, marque com marcar_consulta e só depois confirme para ele: "
+            "dia, data, hora, profissional e endereço.",
+            "Se a ferramenta disser que o horário não está mais livre, peça desculpas e ofereça outros.",
+            "Para saber se o paciente já tem consulta marcada, use consultas_do_paciente.",
+            "Remarcar ou cancelar consulta: passe para a equipe.",
+        ]
+        outros = [x for x in profs if not AG.tem_agenda(x)]
+        if outros:
+            p += [f"Para {', '.join(x['nome'] for x in outros)} ainda não há agenda aqui: anote o pedido como abaixo.",
+                  "Nesse caso, inclua no fim da sua mensagem, numa linha separada, exatamente:",
+                  "[AGENDAMENTO: nome do paciente | profissional ou especialidade | dia e horário desejado | particular ou convênio | observação]",
+                  "Essa linha não aparece para o paciente."]
+    p += [] if com_agenda else [
         "",
         "=== AGENDAMENTO ===",
         "Você ainda não tem acesso à agenda, então não confirme horário como certo. "
@@ -464,6 +498,8 @@ def montar_prompt(c: dict, conf: dict) -> str:
         "e inclua no fim da sua mensagem, numa linha separada, exatamente:",
         "[AGENDAMENTO: nome do paciente | profissional ou especialidade | dia e horário desejado | particular ou convênio | observação]",
         "Essa linha não aparece para o paciente.",
+    ]
+    p += [
         "",
         "=== PASSAR PARA A EQUIPE ===",
         "Encaminhe para a equipe quando: o paciente pedir para falar com uma pessoa; houver urgência, dor forte ou reclamação; "
@@ -522,6 +558,155 @@ def interpretar_resposta(texto: str) -> tuple[str, str | None, dict | None]:
     return limpo, motivo, pedido
 
 
+DIAS_SEMANA = ["segunda-feira", "terça-feira", "quarta-feira", "quinta-feira", "sexta-feira", "sábado", "domingo"]
+
+
+def contexto_tempo(conf: dict) -> str:
+    """Data de agora e o calendario dos proximos dias (para a IA nao errar dia da semana)."""
+    dt = agora()
+    txt = f"\n\nAGORA: {DIAS_SEMANA[dt.weekday()]}, {dt.strftime('%d/%m/%Y %H:%M')} (horário de Brasília)."
+    if AG.profs_com_agenda(conf):
+        prox = [dt.date() + timedelta(days=i) for i in range(15)]
+        txt += "\nPróximos dias: " + "; ".join(f"{AG.DIAS_CURTOS[d.weekday()]} {d.strftime('%d/%m')}={d.isoformat()}" for d in prox)
+    return txt
+
+
+def ferramentas_agenda(conf: dict) -> list:
+    nomes = [x["nome"] for x in AG.profs_com_agenda(conf)]
+    if not nomes:
+        return []
+    prof = {"type": "string", "enum": nomes, "description": "Nome do profissional, exatamente como na lista."}
+    return [
+        {"name": "ver_horarios_livres",
+         "description": "Mostra os horários livres de verdade na agenda da clínica para um profissional. "
+                        "Use sempre antes de oferecer horários ao paciente.",
+         "input_schema": {"type": "object", "properties": {
+             "profissional": prof,
+             "data_inicial": {"type": "string", "description": "Primeiro dia a olhar, AAAA-MM-DD. Se não souber, deixe vazio (hoje)."},
+             "dias": {"type": "integer", "description": "Quantos dias olhar a partir da data inicial (1 a 14). Padrão 7."},
+             "periodo": {"type": "string", "enum": ["manha", "tarde", "noite", "qualquer"],
+                         "description": "Período que o paciente prefere. Padrão qualquer."}},
+             "required": ["profissional"]}},
+        {"name": "marcar_consulta",
+         "description": "Marca a consulta na agenda da clínica, num horário que apareceu como livre e que o paciente escolheu.",
+         "input_schema": {"type": "object", "properties": {
+             "profissional": prof,
+             "data": {"type": "string", "description": "AAAA-MM-DD"},
+             "hora": {"type": "string", "description": "HH:MM, um dos horários livres"},
+             "nome_paciente": {"type": "string"},
+             "convenio": {"type": "string", "description": "Particular ou o nome do convênio"},
+             "observacao": {"type": "string", "description": "Motivo da consulta ou outra observação curta"}},
+             "required": ["profissional", "data", "hora", "nome_paciente"]}},
+        {"name": "consultas_do_paciente",
+         "description": "Lista as próximas consultas já marcadas para este paciente (deste número de WhatsApp).",
+         "input_schema": {"type": "object", "properties": {}}},
+    ]
+
+
+def _data_param(v: str):
+    try:
+        return datetime.strptime((v or "").strip()[:10], "%Y-%m-%d").date()
+    except ValueError:
+        return None
+
+
+def executar_ferramenta(nome: str, ent: dict, ctx: dict) -> str:
+    """ctx: slug, conf, tel, sim, reservas (lista onde entram as consultas marcadas nesta resposta)."""
+    slug, conf, sim = ctx["slug"], ctx["conf"], ctx["sim"]
+    if nome == "consultas_do_paciente":
+        itens = AG.consultas_do_tel(slug, ctx["tel"], sim)
+        if not itens:
+            return "Nenhuma consulta marcada para este paciente."
+        return "\n".join(f"- {AG.quando_txt(x)} com {x['prof_nome']} ({x.get('paciente') or 'sem nome'})" for x in itens)
+    prof = AG.achar_prof(conf, ent.get("profissional", ""))
+    if not prof or not AG.tem_agenda(prof):
+        return "Profissional não encontrado na agenda. Use um destes: " + ", ".join(x["nome"] for x in AG.profs_com_agenda(conf))
+    hoje = agora().date()
+    if nome == "ver_horarios_livres":
+        ini = max(_data_param(ent.get("data_inicial")) or hoje, hoje)
+        try:
+            dias = max(1, min(14, int(ent.get("dias") or 7)))
+        except (TypeError, ValueError):
+            dias = 7
+        faixa = {"manha": (0, 12 * 60), "tarde": (12 * 60, 18 * 60), "noite": (18 * 60, 24 * 60)}.get(ent.get("periodo") or "", (0, 24 * 60))
+        res = AG.livres(slug, conf, prof, ini, dias, sim)
+        linhas = []
+        for d, hs in res.items():
+            hs = [h for h in hs if faixa[0] <= AG.minutos(h) < faixa[1]]
+            if hs:
+                linhas.append(f"{AG.DIAS_CURTOS[d.weekday()]} {d.strftime('%d/%m')} ({d.isoformat()}): " + ", ".join(hs[:16]))
+        if not linhas:
+            fim = ini + timedelta(days=dias - 1)
+            return (f"Sem horário livre para {prof['nome']} de {ini.strftime('%d/%m')} a {fim.strftime('%d/%m')}"
+                    + (" nesse período do dia" if ent.get("periodo") not in (None, "", "qualquer") else "")
+                    + ". Tente outros dias ou outro período.")
+        return f"Horários livres de {prof['nome']} (consulta de {AG.duracao(prof)} min):\n" + "\n".join(linhas)
+    if nome == "marcar_consulta":
+        d = _data_param(ent.get("data"))
+        hora = (ent.get("hora") or "").strip()[:5]
+        if len(hora) == 4 and hora[1] == ":":
+            hora = "0" + hora
+        if not d or not re.fullmatch(r"\d{2}:\d{2}", hora):
+            return "Data ou hora em formato inválido. Use AAAA-MM-DD e HH:MM."
+        if not (ent.get("nome_paciente") or "").strip():
+            return "Falta o nome do paciente. Pergunte antes de marcar."
+        ok, r = AG.reservar(slug, conf, prof, d, hora, {
+            "paciente": ent.get("nome_paciente"), "tel": ctx["tel"], "convenio": ent.get("convenio"),
+            "obs": ent.get("observacao")}, sim=sim, por="assistente", origem="assistente")
+        if not ok:
+            alt = AG.livres(slug, conf, prof, d, 3, sim)
+            sug = "; ".join(f"{AG.DIAS_CURTOS[x.weekday()]} {x.strftime('%d/%m')}: " + ", ".join(hs[:6]) for x, hs in alt.items())
+            return f"Não marcado: {r}" + (f" Livres perto disso: {sug}" if sug else "")
+        ctx["reservas"].append(r)
+        return f"Consulta marcada: {AG.quando_txt(r)} com {r['prof_nome']}, paciente {r['paciente']}."
+    return "Ferramenta desconhecida."
+
+
+def _bloco_para_param(b) -> dict:
+    if getattr(b, "type", "") == "tool_use":
+        return {"type": "tool_use", "id": b.id, "name": b.name, "input": b.input}
+    return {"type": "text", "text": getattr(b, "text", "")}
+
+
+async def conversar_ia(system: str, msgs: list, ctx: dict, chave_tokens: str) -> str:
+    """Chama a IA com as ferramentas da agenda (se a clinica tiver agenda) e devolve o texto final."""
+    tools = ferramentas_agenda(ctx["conf"])
+    msgs = list(msgs)
+    textos = []
+    for _ in range(6):
+        kw = {"tools": tools} if tools else {}
+        resp = await asyncio.to_thread(
+            claude().messages.create, model=MODELO, max_tokens=700, system=system, messages=msgs, **kw)
+        try:
+            R.hincrby(chave_tokens, "entrada", resp.usage.input_tokens)
+            R.hincrby(chave_tokens, "saida", resp.usage.output_tokens)
+        except Exception:
+            pass
+        texto = "".join(getattr(b, "text", "") for b in resp.content if getattr(b, "type", "") == "text").strip()
+        usos = [b for b in resp.content if getattr(b, "type", "") == "tool_use"]
+        if resp.stop_reason != "tool_use" or not usos:
+            return texto or "\n".join(textos)
+        if texto:
+            textos.append(texto)
+        msgs.append({"role": "assistant", "content": [_bloco_para_param(b) for b in resp.content]})
+        resultados = []
+        for b in usos:
+            try:
+                out = executar_ferramenta(b.name, b.input or {}, ctx)
+            except Exception as e:
+                print(f"CLINICA {ctx['slug']} ferramenta {b.name} erro: {e}")
+                out = "Erro ao consultar a agenda agora. Diga ao paciente que a equipe vai confirmar o horário e encaminhe."
+            resultados.append({"type": "tool_result", "tool_use_id": b.id, "content": out})
+        msgs.append({"role": "user", "content": resultados})
+    return "\n".join(textos)
+
+
+def aviso_consulta(it: dict, tel: str) -> str:
+    return (f"Consulta marcada pelo assistente.\nPaciente: {it.get('paciente') or fmt_tel(tel)} ({fmt_tel(tel)})\n"
+            f"Com: {it['prof_nome']}\nQuando: {AG.quando_txt(it)}\nConvênio: {it.get('convenio') or '-'}\n"
+            f"Ver na agenda: {BASE_URL}/painel/agenda?d={it['data']}")
+
+
 async def responder_paciente(slug: str, tel: str):
     c = obter_clinica(slug)
     if not c or not c.get("bot_ativo") or c.get("desativada") or situacao(c) != "ativa":
@@ -533,20 +718,11 @@ async def responder_paciente(slug: str, tel: str):
     if not msgs or msgs[-1]["role"] != "user":
         return
     dt = agora()
-    dias = ["segunda-feira", "terça-feira", "quarta-feira", "quinta-feira", "sexta-feira", "sábado", "domingo"]
-    system = montar_prompt(c, obter_conf(slug)) + (
-        f"\n\nAGORA: {dias[dt.weekday()]}, {dt.strftime('%d/%m/%Y %H:%M')} (horário de Brasília)."
-        + (f"\nNome do paciente no WhatsApp: {info['nome']}" if info.get("nome") else "")
-    )
-    resp = await asyncio.to_thread(
-        claude().messages.create, model=MODELO, max_tokens=600, system=system, messages=msgs)
-    bruto = "".join(getattr(b, "text", "") for b in resp.content)
-    try:
-        uso = resp.usage
-        R.hincrby(K(slug, "tokens", dt.strftime("%Y-%m")), "entrada", uso.input_tokens)
-        R.hincrby(K(slug, "tokens", dt.strftime("%Y-%m")), "saida", uso.output_tokens)
-    except Exception:
-        pass
+    conf = obter_conf(slug)
+    system = montar_prompt(c, conf) + contexto_tempo(conf) + (
+        f"\nNome do paciente no WhatsApp: {info['nome']}" if info.get("nome") else "")
+    ctx = {"slug": slug, "conf": conf, "tel": tel, "sim": False, "reservas": []}
+    bruto = await conversar_ia(system, msgs, ctx, K(slug, "tokens", dt.strftime("%Y-%m")))
     texto, motivo, pedido = interpretar_resposta(bruto)
 
     # se a equipe assumiu enquanto a IA pensava, nao responde
@@ -558,6 +734,9 @@ async def responder_paciente(slug: str, tel: str):
         await enviar(c, tel, texto)
     nome = (pedido or {}).get("nome") or info.get("nome") or ""
     link = f"{BASE_URL}/painel/conversa/{tel}"
+    for it in ctx["reservas"]:
+        contar(slug, "agendamentos")
+        await avisar_recepcao(c, aviso_consulta(it, tel))
     if pedido:
         criar_pedido(slug, tel, pedido)
         await avisar_recepcao(c, (
@@ -698,11 +877,13 @@ form.in{display:inline}
 .aviso{padding:10px 14px;border-radius:10px;margin-bottom:16px;font-size:14px;background:var(--ok-bg);color:var(--ok)}
 .aviso.erro{background:var(--alerta-bg);color:var(--alerta)}
 label{display:block;font-size:13px;color:var(--txt2);margin:10px 0 4px}
-input[type=text],input[type=email],input[type=password],input[type=tel],textarea,select{width:100%;font:inherit;padding:9px 11px;border:1px solid var(--linha);border-radius:10px;background:#fff;color:var(--tinta)}
+input[type=text],input[type=email],input[type=password],input[type=tel],input[type=number],input[type=date],input[type=time],textarea,select{width:100%;font:inherit;padding:9px 11px;border:1px solid var(--linha);border-radius:10px;background:#fff;color:var(--tinta)}
 textarea{min-height:70px;resize:vertical}
 input:focus,textarea:focus{outline:2px solid var(--lilas);border-color:var(--lilas)}
 .grid2{display:grid;grid-template-columns:1fr 1fr;gap:0 14px}
 @media(max-width:700px){.grid2{grid-template-columns:1fr}}
+.semana{display:grid;grid-template-columns:repeat(4,1fr);gap:0 10px}
+@media(max-width:700px){.semana{grid-template-columns:repeat(2,1fr)}}
 .prof{border:1px solid var(--linha);border-radius:12px;padding:6px 14px 14px;margin-bottom:12px;background:var(--papel)}
 .chat{display:flex;flex-direction:column;gap:8px}
 .msg{max-width:78%;padding:8px 12px;border-radius:14px;font-size:14px;white-space:pre-wrap;word-wrap:break-word}
@@ -729,7 +910,7 @@ def pagina(titulo: str, corpo: str, s: dict | None = None, ativa: str = "", extr
     if s:
         itens = [("painel", "Painel", "/painel"), ("experimentar", "Experimentar", "/painel/experimentar"),
                  ("conversas", "Conversas", "/painel/conversas"),
-                 ("agendamentos", "Agendamentos", "/painel/agendamentos"),
+                 ("agenda", "Agenda", "/painel/agenda"),
                  ("config", "Configurações", "/painel/configuracoes"), ("sair", "Sair", "/sair")]
         nav = "".join(f'<a href="{u}" class="{"ativo" if k == ativa else ""}">{t}</a>' for k, t, u in itens)
         cab = (f'<header><span class="marca"><i></i>a gente assume</span>'
@@ -887,7 +1068,7 @@ async def painel(request: Request, p: int = 7, msg: str = "", s: dict = Depends(
     <div class="stats">
       <div class="stat"><div class="n">{est['conversas']}</div><div class="r">pacientes atendidos</div></div>
       <div class="stat"><div class="n">{est['respostas']}</div><div class="r">respostas do assistente</div></div>
-      <div class="stat"><div class="n">{est['agendamentos']}</div><div class="r">pedidos de agendamento</div></div>
+      <div class="stat"><div class="n">{est['agendamentos']}</div><div class="r">agendamentos</div></div>
       <div class="stat"><div class="n">{est['encaminhados']}</div><div class="r">passados para a equipe</div></div>
     </div>
     <div class="card"><h2>Esperando a equipe <span class="tag {'ag' if n_fila else ''}">{n_fila}</span></h2>{html_fila(slug)}</div>
@@ -1005,7 +1186,7 @@ def painel_agendamentos(s: dict = Depends(exigir_login)):
     corpo = f"""<div class="card"><h2>Pedidos de agendamento</h2>
       <p style="color:var(--txt2);font-size:14px;margin-bottom:10px">O assistente anota o que o paciente quer e avisa a recepção.
       Marque o horário na agenda da clínica, confirme com o paciente e registre aqui.</p>{tabela}</div>"""
-    return html_resp(pagina("Agendamentos", corpo, s, "agendamentos"))
+    return html_resp(pagina("Agendamentos", corpo, s, "agenda"))
 
 
 @router.post("/painel/agendamentos/{pid}")
@@ -1021,11 +1202,394 @@ def painel_agendamento_status(pid: str, status: str = Form(""), s: dict = Depend
 
 
 # ============================================================
+# AGENDA (painel): dia/semana, marcar, mover, cancelar, bloquear
+# ============================================================
+AG_CSS = """<style>
+.ag-ctl{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:14px}
+.ag-ctl form{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
+.ag-ctl select,.ag-ctl input{width:auto}
+.ag-lin{display:flex;gap:10px;align-items:center;padding:7px 0;border-top:1px solid var(--linha);font-size:14px}
+.ag-lin:first-of-type{border-top:none}
+.ag-lin .h{font-family:'JetBrains Mono',monospace;font-size:13px;width:92px;flex:none;color:var(--txt2)}
+.ag-lin .q{flex:1;min-width:0}
+.ag-livre{color:var(--txt2)}
+.ag-livre a{font-size:13px}
+.ag-cons{background:var(--lilas2);border-radius:8px;padding:4px 10px}
+.ag-cons.sim{background:#fff;border:1px dashed var(--lilas)}
+.ag-bloq{background:var(--papel);border-radius:8px;padding:4px 10px;color:var(--txt2)}
+.ag-sem{overflow-x:auto}
+.ag-sem table{min-width:760px;table-layout:fixed}
+.ag-sem td{font-size:13px;padding:6px 4px}
+.ag-sem th{font-size:13px;padding:6px 4px}
+.ag-sem .it{display:block;border-radius:6px;padding:3px 6px;margin-bottom:4px;background:var(--lilas2);text-decoration:none}
+.ag-sem .it.sim{background:#fff;border:1px dashed var(--lilas)}
+.ag-sem .it.bl{background:var(--papel);color:var(--txt2)}
+.ag-sem .hoje{background:var(--ok-bg)}
+</style>"""
+
+
+def _quem(s: dict) -> str:
+    return s["usuario"].get("nome") or s["usuario"]["email"]
+
+
+def _dia(v: str):
+    try:
+        return datetime.strptime((v or "")[:10], "%Y-%m-%d").date()
+    except ValueError:
+        return agora().date()
+
+
+def _link_ag(d, v="dia", prof="", sim=False) -> str:
+    q = f"/painel/agenda?d={d.isoformat()}&v={v}"
+    if prof:
+        q += f"&prof={prof}"
+    if sim:
+        q += "&sim=1"
+    return q
+
+
+def _opts_prof(profs: list, sel: str = "", todos: str = "") -> str:
+    o = f'<option value="">{esc(todos)}</option>' if todos else ""
+    return o + "".join(f'<option value="{esc(p["id"])}" {"selected" if p["id"] == sel else ""}>{esc(p["nome"])}</option>'
+                       for p in profs)
+
+
+def _rotulo_item(x: dict) -> str:
+    if x.get("tipo") == "bloqueio":
+        return "Bloqueado" + (f": {esc(x['motivo'])}" if x.get("motivo") else "")
+    tags = ""
+    if x.get("sim"):
+        tags += ' <span class="tag">simulação</span>'
+    elif x.get("origem") == "assistente":
+        tags += ' <span class="tag hu">pelo assistente</span>'
+    if x.get("encaixe"):
+        tags += ' <span class="tag">encaixe</span>'
+    conv_ = f' · {esc(x["convenio"])}' if x.get("convenio") else ""
+    return f'<b>{esc(x.get("paciente") or "sem nome")}</b>{conv_}{tags}'
+
+
+def html_ag_dia(slug: str, conf: dict, profs: list, d, sim: bool) -> str:
+    itens = AG.listar(slug, d, d, sim)
+    gerais = [x for x in itens if x.get("tipo") == "bloqueio" and not x.get("prof_id")]
+    blocos = []
+    for x in gerais:
+        hr = "dia todo" if x.get("dia_todo") else f"{x['inicio']}–{x['fim']}"
+        blocos.append(f'<div class="aviso" style="background:var(--papel);color:var(--txt2)">Todos bloqueados, {hr}'
+                      f'{(": " + esc(x["motivo"])) if x.get("motivo") else ""} '
+                      f'<form class="in" method="post" action="/painel/agenda/item/{esc(x["id"])}/desbloquear">'
+                      f'<button class="btn sec peq">Desbloquear</button></form></div>')
+    for p in profs:
+        meus = [x for x in itens if x.get("prof_id") == p["id"]]
+        livres = AG.livres_no_dia(slug, conf, p, d, sim, respeitar_regras=False)
+        agora_ = agora().replace(tzinfo=None)
+        linhas = []
+        for x in meus:
+            hr = "dia todo" if x.get("dia_todo") else f"{x['inicio']}–{x['fim']}"
+            if x.get("tipo") == "bloqueio":
+                q = (f'<span class="ag-bloq">{_rotulo_item(x)}</span> '
+                     f'<form class="in" method="post" action="/painel/agenda/item/{esc(x["id"])}/desbloquear">'
+                     f'<button class="btn sec peq">Desbloquear</button></form>')
+            else:
+                q = (f'<a class="ag-cons {"sim" if x.get("sim") else ""}" href="/painel/agenda/item/{esc(x["id"])}" '
+                     f'style="text-decoration:none;display:inline-block">{_rotulo_item(x)}</a>')
+            linhas.append((x["inicio"], f'<div class="ag-lin"><span class="h">{hr}</span><div class="q">{q}</div></div>'))
+        for h in livres:
+            passou = datetime.combine(d, datetime.min.time()) + timedelta(minutes=AG.minutos(h)) < agora_
+            marcar = "" if passou else (f' · <a href="/painel/agenda/nova?prof={p["id"]}&d={d.isoformat()}&h={h}">marcar</a>')
+            linhas.append((h, f'<div class="ag-lin ag-livre"><span class="h">{h}</span><div class="q">livre{marcar}</div></div>'))
+        linhas.sort(key=lambda t: t[0])
+        corpo = "".join(l for _, l in linhas) or '<div class="vazio">Não atende neste dia.</div>'
+        blocos.append(f'<div class="card"><h2>{esc(p["nome"])} <span class="mono" style="font-size:12px;color:var(--txt2);font-weight:400">'
+                      f'{esc(AG.resumo_semana(p))}</span></h2>{corpo}</div>')
+    return "".join(blocos)
+
+
+def html_ag_semana(slug: str, conf: dict, profs: list, d, sim: bool, prof_sel: str) -> str:
+    ini = d - timedelta(days=d.weekday())
+    dias = [ini + timedelta(days=i) for i in range(7)]
+    itens = AG.listar(slug, ini, dias[-1], sim)
+    ids = {p["id"] for p in profs}
+    hoje = agora().date()
+    cab = "".join(f'<th class="{"hoje" if x == hoje else ""}"><a href="{_link_ag(x, "dia", prof_sel, sim)}">'
+                  f'{AG.DIAS_CURTOS[x.weekday()]} {x.strftime("%d/%m")}</a></th>' for x in dias)
+    cels = []
+    for x in dias:
+        dd = x.isoformat()
+        conteudo = []
+        for it in itens:
+            if it["data"] != dd or (it.get("prof_id") and it["prof_id"] not in ids):
+                continue
+            quem = "" if len(profs) == 1 else f' · {esc(it.get("prof_nome", ""))}'
+            if it.get("tipo") == "bloqueio":
+                hr = "dia todo" if it.get("dia_todo") else f"{it['inicio']}–{it['fim']}"
+                conteudo.append(f'<span class="it bl">{hr} bloqueado{quem}</span>')
+            else:
+                conteudo.append(f'<a class="it {"sim" if it.get("sim") else ""}" href="/painel/agenda/item/{esc(it["id"])}">'
+                                f'<span class="mono">{it["inicio"]}</span> {esc(it.get("paciente") or "sem nome")}{quem}</a>')
+        n_livres = sum(len(AG.livres_no_dia(slug, conf, p, x, sim, respeitar_regras=False)) for p in profs) if x >= hoje else 0
+        if n_livres:
+            conteudo.append(f'<a href="{_link_ag(x, "dia", prof_sel, sim)}" style="font-size:12px;color:var(--txt2)">{n_livres} livres</a>')
+        cels.append(f'<td class="{"hoje" if x == hoje else ""}">{"".join(conteudo)}</td>')
+    return (f'<div class="card ag-sem"><table><tr>{cab}</tr><tr>{"".join(cels)}</tr></table></div>')
+
+
+@router.get("/painel/agenda", response_class=HTMLResponse)
+def painel_agenda(d: str = "", v: str = "dia", prof: str = "", sim: int = 0, msg: str = "", erro: str = "",
+                  s: dict = Depends(exigir_login)):
+    slug = s["clinica"]["slug"]
+    conf = obter_conf(slug)
+    todos = AG.profs_com_agenda(conf)
+    dia = _dia(d)
+    v = "semana" if v == "semana" else "dia"
+    simb = bool(sim)
+    profs = [p for p in todos if not prof or p["id"] == prof]
+    aviso = (f'<div class="aviso">{esc(msg)}</div>' if msg else "") + (f'<div class="aviso erro">{esc(erro)}</div>' if erro else "")
+    if not todos:
+        corpo = f"""{aviso}<div class="card"><h2>Agenda</h2>
+          <p style="font-size:15px;margin-bottom:8px">Para o assistente marcar consultas direto aqui, diga os horários de cada profissional.</p>
+          <p style="color:var(--txt2);font-size:14px;margin-bottom:12px">Em <b>Configurações</b>, em cada profissional, preencha os dias e horários
+          (ex.: <span class="mono">8h-12h, 14h-18h</span>) e a duração da consulta. A partir daí o assistente oferece só horários livres
+          e a recepção vê tudo aqui: move, cancela e bloqueia.</p>
+          <a class="btn lil" href="/painel/configuracoes">Preencher os horários</a></div>{html_ag_pedidos_link(slug)}"""
+        return html_resp(pagina("Agenda", corpo, s, "agenda", AG_CSS))
+    passo = 7 if v == "semana" else 1
+    ant, prox = dia - timedelta(days=passo), dia + timedelta(days=passo)
+    if v == "semana":
+        ini = dia - timedelta(days=dia.weekday())
+        titulo = f"Semana de {ini.strftime('%d/%m')} a {(ini + timedelta(days=6)).strftime('%d/%m')}"
+    else:
+        titulo = AG.quando_txt(dia).capitalize()
+    controles = f"""<div class="ag-ctl">
+      <a class="btn sec peq" href="{_link_ag(ant, v, prof, simb)}">‹</a>
+      <a class="btn sec peq" href="{_link_ag(agora().date(), v, prof, simb)}">Hoje</a>
+      <a class="btn sec peq" href="{_link_ag(prox, v, prof, simb)}">›</a>
+      <h2 style="font-size:18px;margin:0 6px">{esc(titulo)}</h2>
+      <form method="get" action="/painel/agenda" style="margin-left:auto">
+        <input type="date" name="d" value="{dia.isoformat()}" onchange="this.form.submit()">
+        <select name="v" onchange="this.form.submit()"><option value="dia">Dia</option>
+          <option value="semana" {"selected" if v == "semana" else ""}>Semana</option></select>
+        {'<select name="prof" onchange="this.form.submit()">' + _opts_prof(todos, prof, "Todos os profissionais") + '</select>' if len(todos) > 1 else ''}
+        <label style="margin:0;font-size:13px"><input type="checkbox" name="sim" value="1" {"checked" if simb else ""}
+          onchange="this.form.submit()"> mostrar simulação</label>
+      </form></div>
+    <div class="ag-ctl">
+      <a class="btn" href="/painel/agenda/nova?d={dia.isoformat()}{'&prof=' + prof if prof else ''}">Marcar consulta</a>
+      <a class="btn sec" href="#bloquear" onclick="document.getElementById('bloquear').open=true">Bloquear horário</a>
+    </div>"""
+    miolo = html_ag_semana(slug, conf, profs, dia, simb, prof) if v == "semana" else html_ag_dia(slug, conf, profs, dia, simb)
+    bloquear = f"""<details class="card" id="bloquear"><summary><b>Bloquear horário</b> (folga, feriado, compromisso)</summary>
+      <form method="post" action="/painel/agenda/bloquear" style="margin-top:8px">
+        <div class="grid2">
+          <div><label>Profissional</label><select name="prof">{_opts_prof(todos, prof, "Todos (a clínica inteira)")}</select></div>
+          <div><label>Dia</label><input type="date" name="d" value="{dia.isoformat()}" required></div>
+          <div><label>Das (vazio = dia todo)</label><input type="time" name="ini"></div>
+          <div><label>Até</label><input type="time" name="fim"></div>
+        </div>
+        <label>Motivo (só a equipe vê)</label><input type="text" name="motivo" placeholder="Feriado, curso, consulta externa">
+        <div style="margin-top:12px"><button class="btn">Bloquear</button></div>
+      </form></details>"""
+    sim_ctl = ""
+    if simb:
+        sim_ctl = ('<div class="card"><p style="font-size:14px;color:var(--txt2)">As reservas com borda tracejada foram feitas na aba '
+                   'Experimentar. Elas não ocupam a agenda de verdade: nenhum paciente perde horário por causa delas.</p>'
+                   '<form method="post" action="/painel/agenda/simulacao/apagar" style="margin-top:8px">'
+                   '<button class="btn sec peq">Apagar reservas de simulação</button></form></div>')
+    corpo = f"{aviso}{controles}{miolo}{sim_ctl}{bloquear}{html_ag_pedidos_link(slug)}"
+    return html_resp(pagina("Agenda", corpo, s, "agenda", AG_CSS + '<meta http-equiv="refresh" content="120">'))
+
+
+def html_ag_pedidos_link(slug: str) -> str:
+    n = sum(1 for p in listar_pedidos(slug) if p.get("status", "novo") == "novo")
+    if not n:
+        return '<p style="font-size:13px;margin-top:6px"><a href="/painel/agendamentos">Pedidos anotados pelo assistente</a></p>'
+    return (f'<div class="card"><h2>Pedidos anotados para confirmar <span class="tag ag">{n}</span></h2>'
+            f'<p style="font-size:14px;color:var(--txt2)">Pedidos de profissionais que ainda não têm horários na agenda. '
+            f'<a href="/painel/agendamentos">Ver os pedidos</a></p></div>')
+
+
+@router.get("/painel/agenda/nova", response_class=HTMLResponse)
+def painel_agenda_nova(prof: str = "", d: str = "", h: str = "", erro: str = "", s: dict = Depends(exigir_login)):
+    slug = s["clinica"]["slug"]
+    conf = obter_conf(slug)
+    todos = AG.profs_com_agenda(conf)
+    if not todos:
+        return RedirectResponse("/painel/agenda", status_code=303)
+    dia = _dia(d)
+    aviso = f'<div class="aviso erro">{esc(erro)}</div>' if erro else ""
+    corpo = f"""<p style="margin-bottom:12px"><a href="{_link_ag(dia)}">Voltar à agenda</a></p>{aviso}
+    <form method="post" action="/painel/agenda/nova" class="card" style="max-width:560px"><h2>Marcar consulta</h2>
+      <div class="grid2">
+        <div><label>Profissional</label><select name="prof">{_opts_prof(todos, prof)}</select></div>
+        <div><label>Dia</label><input type="date" name="d" value="{dia.isoformat()}" required></div>
+        <div><label>Hora</label><input type="time" name="h" value="{esc(h)}" required></div>
+        <div><label>Paciente</label><input type="text" name="paciente" required></div>
+        <div><label>WhatsApp do paciente</label><input type="tel" name="tel" placeholder="(11) 99999-8888"></div>
+        <div><label>Particular ou convênio</label><input type="text" name="convenio"></div>
+      </div>
+      <label>Observação</label><input type="text" name="obs">
+      <label style="margin-top:12px"><input type="checkbox" name="encaixe" value="1"> Encaixe (fora da grade de horários)</label>
+      <div style="margin-top:14px"><button class="btn">Marcar</button></div></form>"""
+    return html_resp(pagina("Marcar consulta", corpo, s, "agenda", AG_CSS))
+
+
+@router.post("/painel/agenda/nova")
+async def painel_agenda_nova_post(request: Request, s: dict = Depends(exigir_login)):
+    slug = s["clinica"]["slug"]
+    conf = obter_conf(slug)
+    f = await request.form()
+    p = AG.achar_prof(conf, str(f.get("prof", "")))
+    dia, h = _dia(str(f.get("d", ""))), str(f.get("h", ""))[:5]
+    if not p:
+        return RedirectResponse("/painel/agenda/nova?erro=" + quote("Escolha o profissional."), status_code=303)
+    ok, r = AG.reservar(slug, conf, p, dia, h, {
+        "paciente": str(f.get("paciente", "")), "tel": str(f.get("tel", "")), "convenio": str(f.get("convenio", "")),
+        "obs": str(f.get("obs", ""))}, encaixe=bool(f.get("encaixe")), por=_quem(s), origem="equipe")
+    if not ok:
+        return RedirectResponse(f"/painel/agenda/nova?prof={p['id']}&d={dia.isoformat()}&h={quote(h)}&erro="
+                                + quote(r + " Se for um encaixe, marque a opção Encaixe."), status_code=303)
+    return RedirectResponse(_link_ag(dia) + "&msg=" + quote(f"Consulta marcada: {AG.quando_txt(r)}."), status_code=303)
+
+
+@router.get("/painel/agenda/item/{iid}", response_class=HTMLResponse)
+def painel_agenda_item(iid: str, erro: str = "", msg: str = "", s: dict = Depends(exigir_login)):
+    slug = s["clinica"]["slug"]
+    conf = obter_conf(slug)
+    it = AG.obter(slug, iid)
+    if not it or it.get("tipo") != "consulta":
+        raise HTTPException(status_code=404)
+    dia = _dia(it["data"])
+    aviso = (f'<div class="aviso erro">{esc(erro)}</div>' if erro else "") + (f'<div class="aviso">{esc(msg)}</div>' if msg else "")
+    tel = it.get("tel", "")
+    conversa = ""
+    if tel and not it.get("sim") and R.exists(K(slug, "conv", tel)):
+        conversa = f' · <a href="/painel/conversa/{tel}">ver conversa</a>'
+    contato = (f'<span class="mono">{fmt_tel(tel)}</span>{conversa}' if tel else
+               ("simulação (aba Experimentar)" if it.get("sim") else "sem WhatsApp"))
+    mud = "".join(f'<li>{esc(m.get("acao"))} por {esc(m.get("por") or "-")} {ha_quanto(m.get("em", "") + "-03:00")}'
+                  f'{(" (antes: " + esc(m["antes"]) + ")") if m.get("antes") else ""}</li>' for m in it.get("mudancas", []))
+    cancelada = it.get("status") == "cancelada"
+    pode_avisar = bool(tel) and not it.get("sim")
+    avisar = ('<label style="margin-top:10px"><input type="checkbox" name="avisar" value="1" checked> '
+              'Avisar o paciente pelo WhatsApp</label>') if pode_avisar else ""
+    acoes = "" if cancelada else f"""
+    <form method="post" action="/painel/agenda/item/{esc(iid)}/mover" class="card" style="max-width:560px"><h2>Mudar dia ou horário</h2>
+      <div class="grid2">
+        <div><label>Profissional</label><select name="prof">{_opts_prof(AG.profs_com_agenda(conf), it.get("prof_id", ""))}</select></div>
+        <div><label>Dia</label><input type="date" name="d" value="{it['data']}" required></div>
+        <div><label>Hora</label><input type="time" name="h" value="{it['inicio']}" required></div>
+      </div>
+      <label style="margin-top:10px"><input type="checkbox" name="encaixe" value="1"> Encaixe (fora da grade de horários)</label>
+      {avisar}
+      <div style="margin-top:12px"><button class="btn">Mudar</button></div></form>
+    <form method="post" action="/painel/agenda/item/{esc(iid)}/cancelar" class="card" style="max-width:560px"><h2>Cancelar consulta</h2>
+      {avisar}
+      <div style="margin-top:12px"><button class="btn sec">Cancelar consulta</button></div></form>"""
+    corpo = f"""<p style="margin-bottom:12px"><a href="{_link_ag(dia, sim=it.get('sim', False))}">Voltar à agenda</a></p>{aviso}
+    <div class="card"><div class="linha"><h2 style="margin:0">{esc(it.get('paciente') or 'sem nome')}</h2>
+      {'<span class="tag">cancelada</span>' if cancelada else '<span class="tag ok">marcada</span>'}
+      {'<span class="tag">simulação</span>' if it.get('sim') else ''}</div>
+      <p style="margin-top:8px"><b>{esc(AG.quando_txt(it))}</b> até {it['fim']} com {esc(it.get('prof_nome'))}</p>
+      <p style="font-size:14px;color:var(--txt2);margin-top:4px">{contato}
+        {(' · ' + esc(it['convenio'])) if it.get('convenio') else ''}{(' · ' + esc(it['obs'])) if it.get('obs') else ''}</p>
+      <p style="font-size:13px;color:var(--txt2);margin-top:4px">Marcada {'pelo assistente' if it.get('origem') == 'assistente' else 'por ' + esc(it.get('criado_por') or 'equipe')}
+        {ha_quanto(it.get('criado_em', '') + '-03:00')}</p>
+      {('<ul style="font-size:13px;color:var(--txt2);margin:6px 0 0 18px">' + mud + '</ul>') if mud else ''}</div>{acoes}"""
+    return html_resp(pagina("Consulta", corpo, s, "agenda", AG_CSS))
+
+
+async def _avisar_paciente(s: dict, it: dict, texto: str) -> str:
+    """Manda a mensagem ao paciente e registra na conversa. Devolve um complemento para o aviso do painel."""
+    c = obter_clinica(s["clinica"]["slug"])
+    tel = it.get("tel", "")
+    if not tel or it.get("sim"):
+        return ""
+    if not await enviar(c, tel, texto):
+        return " Não deu para avisar o paciente pelo WhatsApp: avise por outro meio."
+    registrar_msg(c["slug"], tel, "equipe", texto, autor=_quem(s))
+    return " Paciente avisado pelo WhatsApp."
+
+
+@router.post("/painel/agenda/item/{iid}/mover")
+async def painel_agenda_mover(iid: str, request: Request, s: dict = Depends(exigir_login)):
+    slug = s["clinica"]["slug"]
+    conf = obter_conf(slug)
+    f = await request.form()
+    p = AG.achar_prof(conf, str(f.get("prof", "")))
+    antes = AG.obter(slug, iid)
+    if not p or not antes:
+        return RedirectResponse(f"/painel/agenda/item/{iid}?erro=" + quote("Escolha o profissional."), status_code=303)
+    ok, r = AG.mover(slug, conf, iid, p, _dia(str(f.get("d", ""))), str(f.get("h", ""))[:5],
+                     encaixe=bool(f.get("encaixe")), por=_quem(s))
+    if not ok:
+        return RedirectResponse(f"/painel/agenda/item/{iid}?erro=" + quote(r + " Se for um encaixe, marque a opção Encaixe."),
+                                status_code=303)
+    extra = ""
+    if f.get("avisar"):
+        nome = (r.get("paciente") or "").split(" ")[0]
+        extra = await _avisar_paciente(s, r, (
+            f"Olá{', ' + nome if nome else ''}. Sua consulta com {r['prof_nome']} foi remarcada para "
+            f"{AG.quando_txt(r)}. Se esse horário não der, é só responder aqui."))
+    return RedirectResponse(f"/painel/agenda/item/{iid}?msg=" + quote(f"Consulta movida para {AG.quando_txt(r)}." + extra),
+                            status_code=303)
+
+
+@router.post("/painel/agenda/item/{iid}/cancelar")
+async def painel_agenda_cancelar(iid: str, request: Request, s: dict = Depends(exigir_login)):
+    slug = s["clinica"]["slug"]
+    f = await request.form()
+    it = AG.cancelar(slug, iid, por=_quem(s))
+    if not it:
+        raise HTTPException(status_code=404)
+    extra = ""
+    if f.get("avisar"):
+        nome = (it.get("paciente") or "").split(" ")[0]
+        extra = await _avisar_paciente(s, it, (
+            f"Olá{', ' + nome if nome else ''}. Sua consulta com {it['prof_nome']} de {AG.quando_txt(it)} foi cancelada. "
+            "Se quiser marcar outro horário, é só responder aqui."))
+    return RedirectResponse(_link_ag(_dia(it["data"]), sim=it.get("sim", False)) + "&msg=" + quote("Consulta cancelada." + extra),
+                            status_code=303)
+
+
+@router.post("/painel/agenda/bloquear")
+async def painel_agenda_bloquear(request: Request, s: dict = Depends(exigir_login)):
+    slug = s["clinica"]["slug"]
+    conf = obter_conf(slug)
+    f = await request.form()
+    ref = str(f.get("prof", ""))
+    p = AG.achar_prof(conf, ref) if ref else None
+    dia = _dia(str(f.get("d", "")))
+    ok, r = AG.bloquear(slug, p, dia, str(f.get("ini", ""))[:5], str(f.get("fim", ""))[:5], str(f.get("motivo", "")), por=_quem(s))
+    if not ok:
+        return RedirectResponse(_link_ag(dia) + "&erro=" + quote(r), status_code=303)
+    conflitos = [x for x in AG.listar(slug, dia, dia) if x.get("tipo") == "consulta" and (not p or x.get("prof_id") == p["id"])
+                 and AG.minutos(x["inicio"]) < AG.minutos(r["fim"]) and AG.minutos(r["inicio"]) < AG.minutos(x["fim"])]
+    m = "Horário bloqueado. O assistente não oferece mais esse período."
+    if conflitos:
+        m += f" Atenção: {len(conflitos)} consulta(s) já marcada(s) nesse período continuam na agenda. Mova ou cancele."
+    return RedirectResponse(_link_ag(dia) + "&msg=" + quote(m), status_code=303)
+
+
+@router.post("/painel/agenda/item/{iid}/desbloquear")
+def painel_agenda_desbloquear(iid: str, s: dict = Depends(exigir_login)):
+    slug = s["clinica"]["slug"]
+    it = AG.obter(slug, iid)
+    AG.desbloquear(slug, iid)
+    dia = _dia(it["data"]) if it else agora().date()
+    return RedirectResponse(_link_ag(dia) + "&msg=" + quote("Desbloqueado."), status_code=303)
+
+
+@router.post("/painel/agenda/simulacao/apagar")
+def painel_agenda_sim_apagar(s: dict = Depends(exigir_login)):
+    AG.apagar_simulacao(s["clinica"]["slug"])
+    return RedirectResponse("/painel/agenda?msg=" + quote("Reservas de simulação apagadas."), status_code=303)
+
+
+# ============================================================
 # CONFIGURACOES
 # ============================================================
 PROF_CAMPOS = (("nome", "Nome", "Dra. Ana Souza"),
                ("especialidades", "Especialidades", "Ortodontia, clareamento"),
-               ("horarios", "Dias e horários", "Seg e qua 8h–12h; sex 14h–18h"),
+               ("horarios", "Observação sobre horários (opcional)", "Avaliação só às segundas"),
                ("convenios", "Convênios que atende", "Unimed Odonto, Amil Dental, particular"),
                ("obs", "Observações", "Não atende criança"))
 
@@ -1036,7 +1600,22 @@ def html_prof(i: int, x: dict) -> str:
         for ch, rot, ex in PROF_CAMPOS)
     remover = (f'<label style="margin-top:10px"><input type="checkbox" name="prof_remover_{i}" value="1"> Remover este profissional</label>'
                if x.get("nome") else '<p style="font-size:13px;color:var(--txt2);margin-top:10px">Preencha para adicionar um profissional.</p>')
-    return f'<div class="prof"><div class="grid2">{campos}</div>{remover}</div>'
+    ag = x.get("agenda") or {}
+    dias = ag.get("dias") or {}
+    grade = "".join(
+        f'<div><label>{AG.DIAS_CURTOS[d].capitalize()}</label><input type="text" name="prof_ag{d}_{i}" '
+        f'value="{esc(dias.get(str(d), ""))}"></div>' for d in range(7))
+    entendido = AG.resumo_semana(x)
+    leitura = (f'<p style="font-size:13px;margin-top:8px">Agenda: <b>{esc(entendido)}</b></p>' if entendido else
+               '<p style="font-size:13px;color:var(--txt2);margin-top:8px">Sem horários aqui, o assistente só anota o pedido '
+               'e a recepção confirma. Com horários, ele marca direto na Agenda.</p>')
+    agenda_html = (f'<div style="margin-top:12px;padding-top:6px;border-top:1px solid var(--linha)">'
+                   f'<b style="font-size:14px">Horários de atendimento</b>'
+                   f'<div class="semana">{grade}<div><label>Consulta (min)</label>'
+                   f'<input type="number" min="5" max="480" step="5" name="prof_dur_{i}" value="{esc(ag.get("duracao") or AG.DURACAO_PADRAO)}"></div></div>'
+                   f'{leitura}</div>')
+    return (f'<div class="prof"><input type="hidden" name="prof_id_{i}" value="{esc(x.get("id", ""))}">'
+            f'<div class="grid2">{campos}</div>{agenda_html}{remover}</div>')
 
 
 @router.get("/painel/configuracoes", response_class=HTMLResponse)
@@ -1063,8 +1642,15 @@ def painel_config(salvo: str = "", s: dict = Depends(exigir_login)):
       </div>
       {campo('convenios', 'Convênios aceitos pela clínica', 'Unimed Odonto, Amil Dental, OdontoPrev', True)}
     </div>
-    <div class="card"><h2>Profissionais</h2>{profs_html}
-      <p style="font-size:13px;color:var(--txt2)">Para incluir mais de um de cada vez, salve e preencha o novo espaço que aparece.</p></div>
+    <div class="card"><h2>Profissionais</h2>
+      <p style="color:var(--txt2);font-size:14px;margin-bottom:10px">Preencha os horários de cada dia (ex.: <span class="mono">8h-12h, 14h-18h</span>).
+      O assistente oferece ao paciente só os horários livres e marca direto na <a href="/painel/agenda">Agenda</a>.</p>
+      {profs_html}
+      <p style="font-size:13px;color:var(--txt2)">Para incluir mais de um de cada vez, salve e preencha o novo espaço que aparece.</p>
+      <div class="grid2" style="margin-top:6px">
+        <div>{campo('ag_antecedencia_h', 'Antecedência mínima para o assistente marcar (horas)', str(AG.ANTECEDENCIA_H_PADRAO))}</div>
+        <div>{campo('ag_janela_dias', 'Marcar até quantos dias à frente', str(AG.JANELA_DIAS_PADRAO))}</div>
+      </div></div>
     <div class="card"><h2>Regras</h2>
       {campo('encaminhar_quando', 'Quando passar para a equipe, além do padrão', 'Pedido de orçamento de implante; paciente pede a Dra. Ana direto', True)}
       {campo('extra', 'Outras informações e regras', 'Primeira consulta de avaliação é gratuita. Não informar preços de tratamento pelo WhatsApp.', True)}
@@ -1086,6 +1672,9 @@ async def painel_config_post(request: Request, s: dict = Depends(exigir_login)):
     conf = obter_conf(slug)
     for ch in ("nome_assistente", "endereco", "funcionamento", "pagamento", "convenios", "encaminhar_quando", "extra"):
         conf[ch] = str(f.get(ch, "")).strip()[:4000]
+    for ch, maximo in (("ag_antecedencia_h", 240), ("ag_janela_dias", 180)):
+        v = so_digitos(f.get(ch, ""))
+        conf[ch] = str(min(int(v), maximo)) if v else ""
     profs = []
     for i in range(60):
         if f.get(f"prof_nome_{i}") is None:
@@ -1093,6 +1682,10 @@ async def painel_config_post(request: Request, s: dict = Depends(exigir_login)):
         if f.get(f"prof_remover_{i}"):
             continue
         x = {ch: str(f.get(f"prof_{ch}_{i}", "")).strip()[:500] for ch, _, _ in PROF_CAMPOS}
+        x["id"] = re.sub(r"[^a-z0-9]", "", str(f.get(f"prof_id_{i}", "")))[:16] or secrets.token_hex(4)
+        dur = so_digitos(f.get(f"prof_dur_{i}", ""))
+        x["agenda"] = {"dias": {str(d): str(f.get(f"prof_ag{d}_{i}", "")).strip()[:120] for d in range(7)},
+                       "duracao": max(5, min(480, int(dur))) if dur else AG.DURACAO_PADRAO}
         if x["nome"]:
             profs.append(x)
     conf["profissionais"] = profs
@@ -1989,6 +2582,7 @@ async def admin_criar_zapi(slug: str, admin: str = Depends(exigir_admin)):
 #         pedido_cota_em), cl:{slug}:exp:uso:{AAAA-MM-DD} (contador do dia)
 EXP_LIMITE_PADRAO = int(os.environ.get("CLINICA_EXPERIMENTAR_LIMITE", "60"))
 EXP_MAX_CHARS = 1000
+EXP_TEL = "experimentar"   # "telefone" do paciente de mentira nas reservas de simulacao
 
 
 def exp_limite(c: dict) -> int:
@@ -2037,26 +2631,23 @@ async def exp_responder(c: dict):
     if not msgs or msgs[-1]["role"] != "user":
         return
     dt = agora()
-    dias = ["segunda-feira", "terça-feira", "quarta-feira", "quinta-feira", "sexta-feira", "sábado", "domingo"]
-    system = montar_prompt(c, obter_conf(slug)) + (
-        f"\n\nAGORA: {dias[dt.weekday()]}, {dt.strftime('%d/%m/%Y %H:%M')} (horário de Brasília).")
-    resp = await asyncio.to_thread(
-        claude().messages.create, model=MODELO, max_tokens=600, system=system, messages=msgs)
-    bruto = "".join(getattr(b, "text", "") for b in resp.content)
-    try:
-        uso = resp.usage
-        R.hincrby(K(slug, "tokens_exp", dt.strftime("%Y-%m")), "entrada", uso.input_tokens)
-        R.hincrby(K(slug, "tokens_exp", dt.strftime("%Y-%m")), "saida", uso.output_tokens)
-    except Exception:
-        pass
+    conf = obter_conf(slug)
+    system = montar_prompt(c, conf) + contexto_tempo(conf)
+    ctx = {"slug": slug, "conf": conf, "tel": EXP_TEL, "sim": True, "reservas": []}
+    bruto = await conversar_ia(system, msgs, ctx, K(slug, "tokens_exp", dt.strftime("%Y-%m")))
     texto, motivo, pedido = interpretar_resposta(bruto)
     if texto:
         exp_registrar(slug, "assistente", texto)
+    for it in ctx["reservas"]:
+        exp_registrar(slug, "nota", (
+            f"Reserva de simulação na agenda: {it.get('paciente') or 'paciente'}, {AG.quando_txt(it)} com {it['prof_nome']}. "
+            "Com o assistente ligado, ela entraria na agenda de verdade e a recepção receberia o aviso no WhatsApp. "
+            "Veja em Agenda (marque \"mostrar simulação\")."))
     if pedido:
         exp_registrar(slug, "nota", (
             f"Aqui a recepção receberia no WhatsApp um pedido de agendamento: {pedido['nome'] or 'paciente'}, "
             f"com {pedido['profissional'] or '-'}, {pedido['quando'] or '-'}, {pedido['convenio'] or '-'}. "
-            "Ele também apareceria em Agendamentos."))
+            "Para o assistente marcar direto na agenda, preencha os horários de cada profissional em Configurações."))
     if motivo:
         exp_registrar(slug, "nota", (
             f"Aqui o assistente pausaria e a recepção receberia um aviso para continuar a conversa. Motivo: {motivo}."))
