@@ -480,12 +480,18 @@ def montar_prompt(c: dict, conf: dict) -> str:
             "ou outro profissional que atende no dia pedido.",
             "Ofereça duas ou três opções de horário de cada vez, com dia da semana, data e hora (ex.: quarta 26/11 às 9h), "
             "de preferência no dia e período que o paciente pediu. Se não houver, ofereça o mais próximo. "
-            "Nunca responda só que \"tem horários\" ou \"posso ver outro dia?\": cite sempre as opções concretas.",
+            "Nunca responda só que \"tem horários\" ou \"posso ver outro dia?\": cite sempre as opções concretas "
+            "(ex.: \"Amanhã, terça 24/11, tenho 14h ou 15h com a Dra. Ana, ou 16h com o Dr. Fabio. Qual prefere?\"). "
+            "Ofereça os horários antes de pedir nome ou convênio.",
+            "Se o dia pedido não tem atendimento (feriado, dia em que o profissional não atende, agenda cheia), "
+            "consulte ver_horarios_livres a partir do dia seguinte e já ofereça as opções mais próximas.",
             "Se o paciente já disse o profissional, o dia e a hora, e esse horário está livre, e você já sabe o nome dele "
-            "e se é particular ou convênio, marque direto com marcar_consulta, sem perguntar mais nada (o motivo da consulta é opcional).",
+            "e se é particular ou convênio, marque direto com marcar_consulta na mesma resposta, sem perguntar mais nada. "
+            "Não pergunte o motivo da consulta: só anote se o paciente contar.",
             "Antes de marcar, tenha o nome do paciente e saiba se é particular ou convênio (qual). "
             "Se for convênio, confira se o profissional atende esse convênio (veja os convênios de cada um acima); "
-            "se não atender, diga isso e ofereça particular ou outro profissional que atenda o convênio. "
+            "se não atender, diga isso e ofereça o mesmo profissional como particular, ou outro profissional da mesma especialidade "
+            "que atenda o convênio. Particular não é convênio: não o liste entre os convênios. "
             "Quando o paciente escolher um dos horários, marque com marcar_consulta e só depois confirme para ele: "
             "dia, data, hora, profissional e endereço.",
             "Se a ferramenta disser que o horário não está mais livre, peça desculpas e ofereça outros.",
@@ -630,7 +636,7 @@ def ferramentas_agenda(conf: dict) -> list:
              "hora": {"type": "string", "description": "HH:MM, um dos horários livres"},
              "nome_paciente": {"type": "string"},
              "convenio": {"type": "string", "description": "Particular ou o nome do convênio"},
-             "observacao": {"type": "string", "description": "Motivo da consulta ou outra observação curta"}},
+             "observacao": {"type": "string", "description": "Opcional. Motivo ou observação, só se o paciente contou (não pergunte)."}},
              "required": ["profissional", "data", "hora", "nome_paciente"]}},
         {"name": "consultas_do_paciente",
          "description": "Lista as próximas consultas já marcadas para este paciente (deste número de WhatsApp).",
