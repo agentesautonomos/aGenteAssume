@@ -10,6 +10,10 @@ on:
         description: "Rodar também as conversas com a IA (precisa do secret ANTHROPIC_API_KEY; custa alguns centavos)"
         type: boolean
         default: true
+      modelo:
+        description: "Modelo do assistente para as conversas (vazio = o mesmo de produção)"
+        type: string
+        default: ""
 
 jobs:
   regras:
@@ -36,16 +40,18 @@ jobs:
       - name: Conversas
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          CLINICA_MODEL: ${{ inputs.modelo }}
         run: |
+          if [ -z "$CLINICA_MODEL" ]; then unset CLINICA_MODEL; fi
           if [ -z "$ANTHROPIC_API_KEY" ]; then
             echo "::error::O secret ANTHROPIC_API_KEY não chegou ao teste. Cadastre em Settings > Secrets and variables > Actions > aba Secrets > Repository secrets, com esse nome exato."
             exit 1
           fi
-          pytest -m ia -v -rA
+          pytest -m ia -v -rA -s
       - name: Guardar o relatório
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: relatorio-conversas
-          path: tests/saida/conversas.md
+          path: tests/saida/
           if-no-files-found: ignore

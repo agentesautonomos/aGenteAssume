@@ -51,6 +51,7 @@ BASE_URL      = os.environ.get("BASE_URL", "https://SEU-DOMINIO.up.railway.app")
 ADMIN_USER    = os.environ.get("ADMIN_USER", "admin")
 ADMIN_PASS    = os.environ.get("ADMIN_PASS", "admin123")
 MODELO        = os.environ.get("CLINICA_MODEL", os.environ.get("AGENT_MODEL", "claude-haiku-4-5-20251001"))
+_MODELO_NOVO = bool(re.match(r"claude-(haiku|sonnet|opus)-5", MODELO))
 DEBOUNCE_SEG  = float(os.environ.get("CLINICA_DEBOUNCE_SEGUNDOS", "10"))
 HIST_LIMITE   = 300         # mensagens guardadas por paciente
 HIST_PROMPT   = 30          # mensagens que vao para a IA
@@ -792,6 +793,9 @@ async def conversar_ia(system: str, msgs: list, ctx: dict, chave_tokens: str) ->
     textos = []
     for _ in range(6):
         kw = {"tools": tools} if tools else {}
+        if _MODELO_NOVO:
+            # modelos da familia 5 pensam por padrao; no WhatsApp a resposta e curta, entao desligamos
+            kw["extra_body"] = {"thinking": {"type": "disabled"}}
         resp = await asyncio.to_thread(
             claude().messages.create, model=MODELO, max_tokens=700, system=system, messages=msgs, **kw)
         try:

@@ -98,9 +98,28 @@ def _juiz(fatos: str, conversa: str, esperado: str) -> dict:
 
 @pytest.fixture(scope="module", autouse=True)
 def _relatorio_novo():
-    if os.path.exists(SAIDA):
-        os.remove(SAIDA)
+    for f in (SAIDA, CUSTOS):
+        if os.path.exists(f):
+            os.remove(f)
     yield
+    if os.path.exists(CUSTOS):
+        linhas = [l.split("\t") for l in open(CUSTOS, encoding="utf-8").read().splitlines()]
+        total = sum(float(l[4]) for l in linhas)
+        print(f"\nCUSTO DO ASSISTENTE ({CL.MODELO}): US$ {total:.4f} em {len(linhas)} conversas "
+              f"(média US$ {total / max(1, len(linhas)):.5f} por conversa; "
+              f"{sum(int(l[2]) for l in linhas)} tokens de entrada, {sum(int(l[3]) for l in linhas)} de saída)")
+
+
+# US$ por milhao de tokens (entrada, saida) do modelo do assistente
+PRECOS = {"claude-haiku-4-5-20251001": (1.0, 5.0), "claude-haiku-4-5": (1.0, 5.0), "claude-haiku-5-5": (0.10, 0.50),
+          "claude-sonnet-5-5": (2.0, 10.0)}
+CUSTOS = os.path.join(os.path.dirname(__file__), "saida", "custos.tsv")
+
+
+def _registrar_custo(nome, ent, sai, custo):
+    os.makedirs(os.path.dirname(CUSTOS), exist_ok=True)
+    with open(CUSTOS, "a", encoding="utf-8") as f:
+        f.write(f"{CL.MODELO}\t{nome}\t{ent}\t{sai}\t{custo:.5f}\n")
 
 
 def _registrar(nome: str, texto: str):
@@ -149,10 +168,17 @@ def test_conversa(nome, mensagens, esperado, instante, conf, relogio, monkeypatc
         problemas.append("usou emoji")
     fatos = (system + "\n\nAgenda de cada profissional:\n"
              + "\n".join(f"- {p['nome']}: {AG.resumo_semana(p) or 'sem agenda no sistema'}" for p in conf["profissionais"]))
+    tk = AG.R.hgetall(CL.K(SLUG, "tokens_teste"))
+    ent, sai = int(tk.get("entrada", 0)), int(tk.get("saida", 0))
+    AG.R.delete(CL.K(SLUG, "tokens_teste"))
+    preco = PRECOS.get(CL.MODELO, (0, 0))
+    custo = (ent * preco[0] + sai * preco[1]) / 1e6
+    _registrar_custo(nome, ent, sai, custo)
     veredito = _juiz(fatos, conversa, esperado)
     if not veredito.get("ok"):
         problemas += [f"juiz: {x}" for x in veredito.get("problemas", [])]
 
-    _registrar(nome, f"**Esperado:** {esperado}\n\n```\n{conversa}\n```\n\n"
+    _registrar(nome, f"**Modelo:** {CL.MODELO} · {ent} tokens de entrada, {sai} de saída · US$ {custo:.4f}\n\n"
+               f"**Esperado:** {esperado}\n\n```\n{conversa}\n```\n\n"
                + ("**OK**" if not problemas else "**Problemas:**\n" + "\n".join(f"- {x}" for x in problemas)))
     assert not problemas, "\n".join(problemas) + "\n\n" + conversa
