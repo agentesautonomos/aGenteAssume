@@ -1226,6 +1226,16 @@ async def admin_clinica(slug: str, msg: str = "", admin: str = Depends(exigir_ad
         <button class="btn sec peq">Configurar isso na Z-API automaticamente</button></form>
       {f'<form method="post" action="/admin/clinicas/{slug}/criar-zapi" style="margin-top:8px"><button class="btn sec peq">Criar e assinar a instância Z-API agora (parceiro)</button></form>' if not zapi_configurada(c) and ZAPI_PARTNER else ''}
     </div>
+    <div class="card"><h2>Teste sem Mercado Pago</h2>
+      {('<p style="font-size:14px">Pagamento simulado ativo. O painel está liberado como se a clínica tivesse pago.</p>'
+        f'<form method="post" action="/admin/clinicas/{slug}/simular-pagamento/desfazer"><button class="btn sec peq">Desfazer simulação (volta para lead)</button></form>')
+       if (c.get('assinatura') or {}).get('simulado') else
+       ('<p style="font-size:14px">Faz o mesmo que um pagamento aprovado no Mercado Pago: libera o painel, passa a clínica para assinantes '
+        'e manda o aviso "Clínica nova pagou" para vocês (e-mail e WhatsApp). Não cobra nada.</p>'
+        f'<form method="post" action="/admin/clinicas/{slug}/simular-pagamento"><button class="btn sec peq">Simular pagamento aprovado</button></form>')
+       if situacao(c) != 'ativa' else
+       '<p style="font-size:14px;color:var(--txt2)">A clínica já está ativa.</p>'}
+    </div>
     <form method="post" action="/admin/clinicas/{slug}" class="card"><h2>Dados</h2>{form_clinica(c)}
       <label>Situação</label><select name="situacao">{''.join(f'<option value="{v}" {"selected" if situacao(c) == v else ""}>{t}</option>' for v, t in SITUACOES.items())}</select>
       <label><input type="checkbox" name="desativada" value="1" {'checked' if c.get('desativada') else ''}> Clínica desativada (ninguém entra, o assistente para)</label>
@@ -1280,6 +1290,38 @@ async def admin_clinica_apagar(slug: str, request: Request, admin: str = Depends
     apagar_clinica(slug)
     print(f"admin {admin} apagou a clinica {slug}")
     return RedirectResponse("/admin/clinicas?msg=" + quote(f"Cadastro {c.get('nome', slug)} apagado."), status_code=303)
+
+
+@router.post("/admin/clinicas/{slug}/simular-pagamento")
+async def admin_simular_pagamento(slug: str, admin: str = Depends(exigir_admin)):
+    c = obter_clinica(slug)
+    if not c:
+        raise HTTPException(status_code=404)
+    if situacao(c) == "ativa":
+        return RedirectResponse(f"/admin/clinicas/{slug}?msg=A+clinica+ja+esta+ativa.", status_code=303)
+    c["assinatura"] = {**(c.get("assinatura") or {}), "simulado": True}
+    c.pop("aviso_pago_enviado", None)
+    salvar_clinica(c)
+    await aplicar_assinatura(slug, {"id": f"simulado-{slug}", "status": "authorized",
+                                    "auto_recurring": {"transaction_amount": valor_plano()}})
+    print(f"admin {admin} simulou pagamento da clinica {slug}")
+    return RedirectResponse(f"/admin/clinicas/{slug}?msg=" + quote("Pagamento simulado: painel liberado e aviso enviado."), status_code=303)
+
+
+@router.post("/admin/clinicas/{slug}/simular-pagamento/desfazer")
+async def admin_simular_desfazer(slug: str, admin: str = Depends(exigir_admin)):
+    c = obter_clinica(slug)
+    if not c:
+        raise HTTPException(status_code=404)
+    if not (c.get("assinatura") or {}).get("simulado"):
+        return RedirectResponse(f"/admin/clinicas/{slug}?msg=Nao+ha+simulacao+para+desfazer.", status_code=303)
+    R.delete(f"cl:preapproval:simulado-{slug}")
+    c.pop("assinatura", None)
+    c.pop("aviso_pago_enviado", None)
+    c["situacao"] = "pendente"
+    c["bot_ativo"] = False
+    salvar_clinica(c)
+    return RedirectResponse(f"/admin/clinicas/{slug}?msg=" + quote("Simulação desfeita: a clínica voltou para leads."), status_code=303)
 
 
 @router.post("/admin/clinicas/{slug}/usuario/remover")
@@ -1717,7 +1759,7 @@ async def criar_instancia_zapi(slug: str) -> bool | str | None:
 async def reverificar_assinatura(c: dict) -> dict:
     a = c.get("assinatura") or {}
     pid = a.get("preapproval_id")
-    if not pid or not MP_TOKEN:
+    if not pid or not MP_TOKEN or a.get("simulado"):
         return c
     try:
         if (agora() - datetime.fromisoformat(a.get("verificado_em", "2000-01-01T00:00:00-03:00"))).total_seconds() < REVERIFICAR_H * 3600:
