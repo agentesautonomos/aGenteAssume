@@ -474,6 +474,10 @@ def montar_prompt(c: dict, conf: dict) -> str:
             "=== AGENDAMENTO (você tem acesso à agenda da clínica) ===",
             f"Você marca consultas de verdade na agenda para: {nomes}.",
             "Nunca invente nem prometa um horário: antes de oferecer, consulte com a ferramenta ver_horarios_livres.",
+            "Nunca ofereça um profissional para um dia em que ele não atende. Se o paciente pede um dia sem dizer o profissional, "
+            "consulte ver_horarios_livres sem profissional e ofereça só quem tem horário livre nesse dia. "
+            "Se o profissional que ele quer não atende nesse dia, diga isso e ofereça os dias em que ele atende "
+            "ou outro profissional que atende no dia pedido.",
             "Ofereça duas ou três opções de horário de cada vez, com dia da semana, data e hora (ex.: quarta 26/11 às 9h), "
             "de preferência no dia e período que o paciente pediu. Se não houver, ofereça o mais próximo.",
             "Antes de marcar, tenha o nome do paciente e saiba se é particular ou convênio (qual). "
@@ -485,7 +489,8 @@ def montar_prompt(c: dict, conf: dict) -> str:
         ]
         outros = [x for x in profs if not AG.tem_agenda(x)]
         if outros:
-            p += [f"Para {', '.join(x['nome'] for x in outros)} ainda não há agenda aqui: anote o pedido como abaixo.",
+            p += [f"Para {', '.join(x['nome'] for x in outros)} ainda não há agenda aqui: anote o pedido como abaixo, "
+                  "respeitando os dias e horários escritos para cada um (não sugira dia em que não atende).",
                   "Nesse caso, inclua no fim da sua mensagem, numa linha separada, exatamente:",
                   "[AGENDAMENTO: nome do paciente | profissional ou especialidade | dia e horário desejado | particular ou convênio | observação]",
                   "Essa linha não aparece para o paciente."]
@@ -494,6 +499,7 @@ def montar_prompt(c: dict, conf: dict) -> str:
         "=== AGENDAMENTO ===",
         "Você ainda não tem acesso à agenda, então não confirme horário como certo. "
         "Descubra o nome do paciente, o profissional ou a especialidade, o dia e período que prefere e se é particular ou convênio (qual). "
+        "Só sugira um profissional para um dia em que ele atende, conforme as informações acima. "
         "Quando tiver isso, diga que vai passar o pedido para a recepção confirmar o horário, "
         "e inclua no fim da sua mensagem, numa linha separada, exatamente:",
         "[AGENDAMENTO: nome do paciente | profissional ou especialidade | dia e horário desejado | particular ou convênio | observação]",
@@ -568,6 +574,10 @@ def contexto_tempo(conf: dict) -> str:
     if AG.profs_com_agenda(conf):
         prox = [dt.date() + timedelta(days=i) for i in range(15)]
         txt += "\nPróximos dias: " + "; ".join(f"{AG.DIAS_CURTOS[d.weekday()]} {d.strftime('%d/%m')}={d.isoformat()}" for d in prox)
+        txt += "\nQuem atende em cada dia da semana (pela agenda): " + "; ".join(
+            f"{AG.DIAS_LONGOS[w]}: " + (", ".join(x["nome"] for x in AG.profs_com_agenda(conf) if AG.intervalos_do_dia(x, w))
+                                       or "ninguém") for w in range(7))
+        txt += "\nSe o paciente disser só o dia do mês (ex.: dia 25), é o próximo dia 25 a partir de hoje."
     return txt
 
 
@@ -578,15 +588,17 @@ def ferramentas_agenda(conf: dict) -> list:
     prof = {"type": "string", "enum": nomes, "description": "Nome do profissional, exatamente como na lista."}
     return [
         {"name": "ver_horarios_livres",
-         "description": "Mostra os horários livres de verdade na agenda da clínica para um profissional. "
-                        "Use sempre antes de oferecer horários ao paciente.",
+         "description": "Mostra os horários livres de verdade na agenda da clínica, por profissional. "
+                        "Use sempre antes de oferecer horários ou um profissional ao paciente. "
+                        "Sem profissional, mostra todos os que atendem no período.",
          "input_schema": {"type": "object", "properties": {
-             "profissional": prof,
+             "profissional": {**prof, "description": "Nome do profissional, exatamente como na lista. "
+                              "Deixe vazio para ver todos os profissionais que atendem no período."},
              "data_inicial": {"type": "string", "description": "Primeiro dia a olhar, AAAA-MM-DD. Se não souber, deixe vazio (hoje)."},
              "dias": {"type": "integer", "description": "Quantos dias olhar a partir da data inicial (1 a 14). Padrão 7."},
              "periodo": {"type": "string", "enum": ["manha", "tarde", "noite", "qualquer"],
                          "description": "Período que o paciente prefere. Padrão qualquer."}},
-             "required": ["profissional"]}},
+             "required": []}},
         {"name": "marcar_consulta",
          "description": "Marca a consulta na agenda da clínica, num horário que apareceu como livre e que o paciente escolheu.",
          "input_schema": {"type": "object", "properties": {
@@ -618,6 +630,10 @@ def executar_ferramenta(nome: str, ent: dict, ctx: dict) -> str:
         if not itens:
             return "Nenhuma consulta marcada para este paciente."
         return "\n".join(f"- {AG.quando_txt(x)} com {x['prof_nome']} ({x.get('paciente') or 'sem nome'})" for x in itens)
+    if nome == "ver_horarios_livres" and not (ent.get("profissional") or "").strip():
+        partes = [executar_ferramenta(nome, {**ent, "profissional": x["id"]}, ctx) for x in AG.profs_com_agenda(conf)]
+        com = [x for x in partes if not x.startswith("Sem horário")]
+        return "\n\n".join(com or partes)
     prof = AG.achar_prof(conf, ent.get("profissional", ""))
     if not prof or not AG.tem_agenda(prof):
         return "Profissional não encontrado na agenda. Use um destes: " + ", ".join(x["nome"] for x in AG.profs_com_agenda(conf))
@@ -639,7 +655,8 @@ def executar_ferramenta(nome: str, ent: dict, ctx: dict) -> str:
             fim = ini + timedelta(days=dias - 1)
             return (f"Sem horário livre para {prof['nome']} de {ini.strftime('%d/%m')} a {fim.strftime('%d/%m')}"
                     + (" nesse período do dia" if ent.get("periodo") not in (None, "", "qualquer") else "")
-                    + ". Tente outros dias ou outro período.")
+                    + f". {prof['nome']} atende: {AG.resumo_semana(prof)}. Não ofereça {prof['nome']} nesses dias; "
+                    "ofereça outros dias dele ou outro profissional.")
         return f"Horários livres de {prof['nome']} (consulta de {AG.duracao(prof)} min):\n" + "\n".join(linhas)
     if nome == "marcar_consulta":
         d = _data_param(ent.get("data"))
