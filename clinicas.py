@@ -727,7 +727,8 @@ FONTES = ('<link rel="preconnect" href="https://fonts.googleapis.com">'
 def pagina(titulo: str, corpo: str, s: dict | None = None, ativa: str = "", extra_head: str = "") -> str:
     cab = ""
     if s:
-        itens = [("painel", "Painel", "/painel"), ("conversas", "Conversas", "/painel/conversas"),
+        itens = [("painel", "Painel", "/painel"), ("experimentar", "Experimentar", "/painel/experimentar"),
+                 ("conversas", "Conversas", "/painel/conversas"),
                  ("agendamentos", "Agendamentos", "/painel/agendamentos"),
                  ("config", "Configurações", "/painel/configuracoes"), ("sair", "Sair", "/sair")]
         nav = "".join(f'<a href="{u}" class="{"ativo" if k == ativa else ""}">{t}</a>' for k, t, u in itens)
@@ -1226,6 +1227,7 @@ async def admin_clinica(slug: str, msg: str = "", admin: str = Depends(exigir_ad
         <button class="btn sec peq">Configurar isso na Z-API automaticamente</button></form>
       {f'<form method="post" action="/admin/clinicas/{slug}/criar-zapi" style="margin-top:8px"><button class="btn sec peq">Criar e assinar a instância Z-API agora (parceiro)</button></form>' if not zapi_configurada(c) and ZAPI_PARTNER else ''}
     </div>
+    {html_exp_admin(c)}
     <div class="card"><h2>Teste sem Mercado Pago</h2>
       {('<p style="font-size:14px">Pagamento simulado ativo. O painel está liberado como se a clínica tivesse pago.</p>'
         f'<form method="post" action="/admin/clinicas/{slug}/simular-pagamento/desfazer"><button class="btn sec peq">Desfazer simulação (volta para lead)</button></form>')
@@ -1847,14 +1849,14 @@ def html_leads() -> str:
         tel = so_digitos(c.get("recepcao_tel", ""))
         wa = f'<a href="https://wa.me/{tel_envio(tel)}" target="_blank" rel="noopener">{fmt_tel(tel)}</a>' if tel else ""
         linhas.append(f"""<tr><td><a href="/admin/clinicas/{c['slug']}">{esc(c['nome'])}</a></td><td>{contato}<br>{wa}</td>
-          <td>{esc(rotulo_situacao(c))}</td><td>{ha_quanto(c.get('criado_em', ''))}</td></tr>""")
+          <td>{esc(rotulo_situacao(c))}</td><td>{html_exp_resumo(c)}</td><td>{ha_quanto(c.get('criado_em', ''))}</td></tr>""")
     if not linhas:
         return ""
     return ('<div class="card"><h2>Cadastros sem assinatura (leads)</h2><table><tr><th>Clínica</th><th>Contato</th>'
-            '<th>Situação</th><th>Cadastro</th></tr>' + "".join(linhas) + "</table></div>")
+            '<th>Situação</th><th>Experimentou</th><th>Cadastro</th></tr>' + "".join(linhas) + "</table></div>")
 
 
-def html_faixa_assinatura(c: dict) -> str:
+def html_faixa_assinatura(c: dict, convite_experimentar: bool = True) -> str:
     sit = situacao(c)
     if sit == "ativa":
         return ""
@@ -1867,7 +1869,9 @@ def html_faixa_assinatura(c: dict) -> str:
                f"falta assinar{preco}.")
     return (f'<div class="card" style="border-color:var(--lilas);background:var(--lilas2)"><h2>Falta assinar</h2>'
             f'<p style="font-size:14px;margin-bottom:12px">{txt}</p>'
-            f'<a class="btn" href="/assinar">Assinar agora</a></div>')
+            f'<a class="btn" href="/assinar">Assinar agora</a> '
+            + (f'<a class="btn sec" href="/painel/experimentar">Antes, experimentar o assistente</a>' if convite_experimentar else '')
+            + '</div>')
 
 
 @router.get("/assinar", response_class=HTMLResponse)
@@ -1974,3 +1978,263 @@ async def admin_criar_zapi(slug: str, admin: str = Depends(exigir_admin)):
     res = await criar_instancia_zapi(slug)
     msg = "Instancia criada e assinada." if res is True else f"Nao deu: {res or 'falta ZAPI_PARTNER_TOKEN'}"
     return RedirectResponse(f"/admin/clinicas/{slug}?msg=" + quote(msg), status_code=303)
+
+
+# ============================================================
+# EXPERIMENTAR O ASSISTENTE (antes de pagar ou de ligar o WhatsApp)
+# ============================================================
+# A clinica conversa com o assistente fazendo o papel de paciente, com as configuracoes dela.
+# Nada sai pelo WhatsApp. Limite de mensagens por dia (padrao 60; o admin pode mudar por clinica).
+# Chaves: cl:{slug}:exp:hist (lista), cl:{slug}:exp:info (hash: total, primeira_em, ultima_em,
+#         pedido_cota_em), cl:{slug}:exp:uso:{AAAA-MM-DD} (contador do dia)
+EXP_LIMITE_PADRAO = int(os.environ.get("CLINICA_EXPERIMENTAR_LIMITE", "60"))
+EXP_MAX_CHARS = 1000
+
+
+def exp_limite(c: dict) -> int:
+    try:
+        return int(c.get("exp_limite") or EXP_LIMITE_PADRAO)
+    except (TypeError, ValueError):
+        return EXP_LIMITE_PADRAO
+
+
+def exp_uso_hoje(slug: str) -> int:
+    return int(R.get(K(slug, "exp", "uso", agora().strftime("%Y-%m-%d"))) or 0)
+
+
+def exp_info(slug: str) -> dict:
+    return R.hgetall(K(slug, "exp", "info"))
+
+
+def exp_hist(slug: str) -> list:
+    return [json.loads(x) for x in R.lrange(K(slug, "exp", "hist"), -HIST_LIMITE, -1)]
+
+
+def exp_registrar(slug: str, papel: str, texto: str):
+    hk = K(slug, "exp", "hist")
+    R.rpush(hk, json.dumps({"papel": papel, "texto": texto, "em": agora().isoformat(timespec="seconds")}, ensure_ascii=False))
+    R.ltrim(hk, -HIST_LIMITE, -1)
+
+
+def exp_mensagens_para_ia(slug: str) -> list:
+    msgs = []
+    for m in exp_hist(slug)[-HIST_PROMPT:]:
+        if m["papel"] not in ("paciente", "assistente"):
+            continue
+        role = "user" if m["papel"] == "paciente" else "assistant"
+        if msgs and msgs[-1]["role"] == role:
+            msgs[-1]["content"] += "\n" + m["texto"]
+        else:
+            msgs.append({"role": role, "content": m["texto"]})
+    while msgs and msgs[0]["role"] != "user":
+        msgs.pop(0)
+    return msgs
+
+
+async def exp_responder(c: dict):
+    slug = c["slug"]
+    msgs = exp_mensagens_para_ia(slug)
+    if not msgs or msgs[-1]["role"] != "user":
+        return
+    dt = agora()
+    dias = ["segunda-feira", "terça-feira", "quarta-feira", "quinta-feira", "sexta-feira", "sábado", "domingo"]
+    system = montar_prompt(c, obter_conf(slug)) + (
+        f"\n\nAGORA: {dias[dt.weekday()]}, {dt.strftime('%d/%m/%Y %H:%M')} (horário de Brasília).")
+    resp = await asyncio.to_thread(
+        claude().messages.create, model=MODELO, max_tokens=600, system=system, messages=msgs)
+    bruto = "".join(getattr(b, "text", "") for b in resp.content)
+    try:
+        uso = resp.usage
+        R.hincrby(K(slug, "tokens_exp", dt.strftime("%Y-%m")), "entrada", uso.input_tokens)
+        R.hincrby(K(slug, "tokens_exp", dt.strftime("%Y-%m")), "saida", uso.output_tokens)
+    except Exception:
+        pass
+    texto, motivo, pedido = interpretar_resposta(bruto)
+    if texto:
+        exp_registrar(slug, "assistente", texto)
+    if pedido:
+        exp_registrar(slug, "nota", (
+            f"Aqui a recepção receberia no WhatsApp um pedido de agendamento: {pedido['nome'] or 'paciente'}, "
+            f"com {pedido['profissional'] or '-'}, {pedido['quando'] or '-'}, {pedido['convenio'] or '-'}. "
+            "Ele também apareceria em Agendamentos."))
+    if motivo:
+        exp_registrar(slug, "nota", (
+            f"Aqui o assistente pausaria e a recepção receberia um aviso para continuar a conversa. Motivo: {motivo}."))
+
+
+def html_exp_msgs(slug: str) -> str:
+    itens = []
+    for m in exp_hist(slug):
+        hora = m.get("em", "")[11:16]
+        if m["papel"] == "nota":
+            itens.append(f'<div class="exp-nota">{esc(m["texto"])}</div>')
+        else:
+            itens.append(f'<div class="msg {m["papel"]}">{esc(m["texto"])}<small>{hora}</small></div>')
+    if not itens:
+        return ('<div class="vazio" style="text-align:center">Escreva como se fosse um paciente. Por exemplo: '
+                '"Oi, queria marcar uma consulta" ou "Vocês atendem convênio?"</div>')
+    return "".join(itens)
+
+
+EXP_CSS = """<style>
+.exp-box{background:var(--papel);border:1px solid var(--linha);border-radius:14px;padding:14px;height:58vh;min-height:320px;overflow-y:auto}
+.exp-nota{align-self:center;max-width:90%;font-size:12px;color:var(--txt2);background:#fff;border:1px dashed var(--linha);border-radius:10px;padding:6px 10px;text-align:center}
+.exp-form{display:flex;gap:8px;margin-top:10px;align-items:flex-end}
+.exp-form textarea{min-height:44px;height:44px;flex:1}
+.exp-uso{font-family:'JetBrains Mono',monospace;font-size:12px;color:var(--txt2)}
+</style>"""
+
+EXP_JS = """<script>
+(function(){var b=document.getElementById('exp-box');if(b)b.scrollTop=b.scrollHeight;
+var f=document.getElementById('exp-form');if(!f)return;var t=f.querySelector('textarea');
+t.focus();
+t.addEventListener('keydown',function(e){if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();if(t.value.trim())f.requestSubmit();}});
+f.addEventListener('submit',function(){var bt=f.querySelector('button');bt.disabled=true;bt.textContent='Respondendo...';
+var d=document.createElement('div');d.className='msg paciente';d.textContent=t.value;var c=b.querySelector('.chat');
+var v=c.querySelector('.vazio');if(v)v.remove();c.appendChild(d);b.scrollTop=b.scrollHeight;});})();
+</script>"""
+
+
+@router.get("/painel/experimentar", response_class=HTMLResponse)
+def painel_experimentar(msg: str = "", s: dict = Depends(exigir_login)):
+    c = obter_clinica(s["clinica"]["slug"])
+    slug = c["slug"]
+    usado, limite = exp_uso_hoje(slug), exp_limite(c)
+    info = exp_info(slug)
+    conf = obter_conf(slug)
+    aviso = f'<div class="aviso">{esc(msg)}</div>' if msg else ""
+    falta_conf = "" if (conf.get("funcionamento") or [x for x in conf["profissionais"] if x.get("nome")]) else (
+        '<div class="aviso erro">O assistente ainda sabe pouco sobre a sua clínica. Preencha '
+        '<a href="/painel/configuracoes">Configurações</a> (horários, profissionais, convênios) e volte aqui: '
+        'ele passa a responder com essas informações na hora.</div>')
+    if usado >= limite:
+        if info.get("pedido_cota_em"):
+            rodape = ('<div class="card" style="margin-top:10px"><b>Você usou as mensagens de hoje.</b> '
+                      '<p style="font-size:14px;margin-top:4px">Seu pedido de mais mensagens foi enviado. A gente libera em breve. '
+                      'Amanhã o contador também volta a zero.</p></div>')
+        else:
+            rodape = (f'<div class="card" style="margin-top:10px"><b>Você usou as {limite} mensagens de hoje.</b>'
+                      '<p style="font-size:14px;margin:4px 0 10px">Amanhã o contador volta a zero. Quer continuar hoje?</p>'
+                      '<form method="post" action="/painel/experimentar/mais"><button class="btn lil">Pedir mais mensagens</button></form></div>')
+    else:
+        rodape = (f'<form method="post" action="/painel/experimentar" class="exp-form" id="exp-form">'
+                  f'<textarea name="texto" maxlength="{EXP_MAX_CHARS}" placeholder="Escreva como paciente..." required></textarea>'
+                  f'<button class="btn">Enviar</button></form>')
+    corpo = f"""{aviso}{falta_conf}
+    <div class="card"><h2>Experimente o seu assistente</h2>
+      <p style="font-size:14px;color:var(--txt2);margin-bottom:12px">Converse com ele fazendo o papel de um paciente.
+      Ele responde com o que está em <a href="/painel/configuracoes">Configurações</a>: mudou lá, ele já responde diferente aqui.
+      Nada sai pelo WhatsApp e nenhum paciente vê esta conversa.</p>
+      <div class="exp-box" id="exp-box"><div class="chat">{html_exp_msgs(slug)}</div></div>
+      {rodape}
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-top:10px;gap:10px;flex-wrap:wrap">
+        <span class="exp-uso">{min(usado, limite)} de {limite} mensagens hoje</span>
+        <form method="post" action="/painel/experimentar/limpar" class="in"><button class="btn sec peq">Começar outra conversa</button></form>
+      </div></div>
+    {html_faixa_assinatura(c, False)}"""
+    return html_resp(pagina("Experimentar", corpo + EXP_JS, s, "experimentar", EXP_CSS))
+
+
+@router.post("/painel/experimentar")
+async def painel_experimentar_post(texto: str = Form(""), s: dict = Depends(exigir_login)):
+    c = obter_clinica(s["clinica"]["slug"])
+    slug = c["slug"]
+    texto = texto.strip()[:EXP_MAX_CHARS]
+    if not texto:
+        return RedirectResponse("/painel/experimentar", status_code=303)
+    async with _lock(f"exp:{slug}"):
+        if exp_uso_hoje(slug) >= exp_limite(c):
+            return RedirectResponse("/painel/experimentar", status_code=303)
+        dk = K(slug, "exp", "uso", agora().strftime("%Y-%m-%d"))
+        R.incr(dk)
+        R.expire(dk, 3 * 86400)
+        ik = K(slug, "exp", "info")
+        agora_iso = agora().isoformat(timespec="seconds")
+        R.hincrby(ik, "total", 1)
+        R.hsetnx(ik, "primeira_em", agora_iso)
+        R.hset(ik, "ultima_em", agora_iso)
+        exp_registrar(slug, "paciente", texto)
+        try:
+            await exp_responder(c)
+        except Exception as e:
+            print(f"EXPERIMENTAR {slug} erro: {e}")
+            return RedirectResponse("/painel/experimentar?msg=" + quote("O assistente não conseguiu responder agora. Tente de novo."),
+                                    status_code=303)
+    return RedirectResponse("/painel/experimentar", status_code=303)
+
+
+@router.post("/painel/experimentar/limpar")
+def painel_experimentar_limpar(s: dict = Depends(exigir_login)):
+    R.delete(K(s["clinica"]["slug"], "exp", "hist"))
+    return RedirectResponse("/painel/experimentar", status_code=303)
+
+
+@router.post("/painel/experimentar/mais")
+async def painel_experimentar_mais(s: dict = Depends(exigir_login)):
+    c = obter_clinica(s["clinica"]["slug"])
+    slug = c["slug"]
+    ik = K(slug, "exp", "info")
+    if not R.hget(ik, "pedido_cota_em"):
+        R.hset(ik, "pedido_cota_em", agora().isoformat(timespec="seconds"))
+        donos = ", ".join(f"{u.get('nome') or ''} <{u['email']}>" for u in usuarios_da_clinica(slug))
+        await avisar_equipe_aga(
+            f"{c['nome']} usou as {exp_limite(c)} mensagens de hoje experimentando o assistente e pediu mais.\n"
+            f"Situação: {rotulo_situacao(c)}\nContato: {donos} / {fmt_tel(c.get('recepcao_tel', ''))}\n"
+            f"Total de mensagens até agora: {R.hget(ik, 'total') or 0}\n"
+            f"Liberar mais e ver a conversa: {BASE_URL}/admin/clinicas/{slug}",
+            "Lead engajado: pediu mais mensagens")
+    return RedirectResponse("/painel/experimentar", status_code=303)
+
+
+def html_exp_resumo(c: dict) -> str:
+    """Resumo curto para a lista de leads do admin."""
+    info = exp_info(c["slug"])
+    if not info.get("total"):
+        return '<span style="color:var(--txt2)">não experimentou</span>'
+    txt = f"{info['total']} msgs, hoje {exp_uso_hoje(c['slug'])}/{exp_limite(c)}"
+    if info.get("pedido_cota_em"):
+        txt += ' <span class="tag ag">pediu mais</span>'
+    return txt
+
+
+def html_exp_admin(c: dict) -> str:
+    slug = c["slug"]
+    info = exp_info(slug)
+    pedido = (f'<p style="font-size:14px"><span class="tag ag">Pediu mais mensagens</span> {ha_quanto(info["pedido_cota_em"])}</p>'
+              if info.get("pedido_cota_em") else "")
+    if info.get("total"):
+        resumo = (f'<p style="font-size:14px">Mensagens enviadas: <b>{info["total"]}</b> no total, '
+                  f'<b>{exp_uso_hoje(slug)}</b> hoje. Primeira {ha_quanto(info.get("primeira_em", ""))}, '
+                  f'última {ha_quanto(info.get("ultima_em", ""))}.</p>')
+    else:
+        resumo = '<p style="font-size:14px;color:var(--txt2)">Ainda não experimentou o assistente.</p>'
+    conversa = "".join(
+        f'<div class="msg {m["papel"] if m["papel"] != "nota" else "paciente"}" '
+        f'style="{"font-size:12px;color:var(--txt2)" if m["papel"] == "nota" else ""}">{esc(m["texto"])}</div>'
+        for m in exp_hist(slug)[-40:])
+    ver = (f'<details style="margin-top:8px"><summary>Ver a conversa atual</summary>'
+           f'<div class="chat" style="margin-top:10px">{conversa}</div></details>') if conversa else ""
+    return f"""<div class="card"><h2>Experimentar o assistente</h2>{pedido}{resumo}
+      <form method="post" action="/admin/clinicas/{slug}/experimentar" style="display:flex;gap:8px;align-items:flex-end;flex-wrap:wrap">
+        <div><label>Mensagens por dia</label><input type="text" name="limite" value="{exp_limite(c)}" style="width:120px"></div>
+        <label style="margin-bottom:10px"><input type="checkbox" name="zerar_hoje" value="1"> zerar o contador de hoje</label>
+        <button class="btn sec peq" style="margin-bottom:6px">Salvar e liberar</button></form>
+      <p style="font-size:13px;color:var(--txt2);margin-top:6px">Salvar também tira o aviso de "pediu mais". Padrão: {EXP_LIMITE_PADRAO} por dia.</p>
+      {ver}</div>"""
+
+
+@router.post("/admin/clinicas/{slug}/experimentar")
+async def admin_experimentar(slug: str, request: Request, admin: str = Depends(exigir_admin)):
+    c = obter_clinica(slug)
+    if not c:
+        raise HTTPException(status_code=404)
+    f = await request.form()
+    try:
+        c["exp_limite"] = max(0, min(5000, int(str(f.get("limite", "")).strip())))
+    except ValueError:
+        return RedirectResponse(f"/admin/clinicas/{slug}?msg=Limite+invalido.", status_code=303)
+    salvar_clinica(c)
+    if f.get("zerar_hoje"):
+        R.delete(K(slug, "exp", "uso", agora().strftime("%Y-%m-%d")))
+    R.hdel(K(slug, "exp", "info"), "pedido_cota_em")
+    return RedirectResponse(f"/admin/clinicas/{slug}?msg=" + quote(f"Liberado: {c['exp_limite']} mensagens por dia."), status_code=303)
