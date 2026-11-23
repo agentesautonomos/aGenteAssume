@@ -481,6 +481,8 @@ def montar_prompt(c: dict, conf: dict) -> str:
             "Ofereça duas ou três opções de horário de cada vez, com dia da semana, data e hora (ex.: quarta 26/11 às 9h), "
             "de preferência no dia e período que o paciente pediu. Se não houver, ofereça o mais próximo.",
             "Antes de marcar, tenha o nome do paciente e saiba se é particular ou convênio (qual). "
+            "Se for convênio, confira se o profissional atende esse convênio (veja os convênios de cada um acima); "
+            "se não atender, diga isso e ofereça particular ou outro profissional que atenda o convênio. "
             "Quando o paciente escolher um dos horários, marque com marcar_consulta e só depois confirme para ele: "
             "dia, data, hora, profissional e endereço.",
             "Se a ferramenta disser que o horário não está mais livre, peça desculpas e ofereça outros.",
@@ -568,16 +570,33 @@ DIAS_SEMANA = ["segunda-feira", "terça-feira", "quarta-feira", "quinta-feira", 
 
 
 def contexto_tempo(conf: dict) -> str:
-    """Data de agora e o calendario dos proximos dias (para a IA nao errar dia da semana)."""
+    """Data de agora e o calendario dos proximos dias (para a IA nao errar dia da semana nem data relativa)."""
     dt = agora()
+    hoje = dt.date()
     txt = f"\n\nAGORA: {DIAS_SEMANA[dt.weekday()]}, {dt.strftime('%d/%m/%Y %H:%M')} (horário de Brasília)."
     if AG.profs_com_agenda(conf):
-        prox = [dt.date() + timedelta(days=i) for i in range(15)]
-        txt += "\nPróximos dias: " + "; ".join(f"{AG.DIAS_CURTOS[d.weekday()]} {d.strftime('%d/%m')}={d.isoformat()}" for d in prox)
+        _, jan = AG.regras(conf)
+        n = min(jan, 60) + 1
+        prox = [hoje + timedelta(days=i) for i in range(n)]
+        txt += "\nCalendário (até onde a agenda marca): " + "; ".join(
+            f"{AG.DIAS_CURTOS[d.weekday()]} {d.strftime('%d/%m')}={d.isoformat()}" for d in prox)
+        seg_que_vem = hoje + timedelta(days=7 - hoje.weekday())
+        dom_hoje = seg_que_vem - timedelta(days=1)
+        f = lambda d: f"{AG.DIAS_CURTOS[d.weekday()]} {d.strftime('%d/%m')}"
+        txt += (f"\nDatas relativas: hoje = {f(hoje)}; amanhã = {f(hoje + timedelta(days=1))}; "
+                f"depois de amanhã = {f(hoje + timedelta(days=2))}; esta semana = até {f(dom_hoje)}; "
+                f"semana que vem = de {f(seg_que_vem)} a {f(seg_que_vem + timedelta(days=6))}. "
+                "Se o paciente disser só o dia do mês (ex.: dia 25), é o próximo dia 25 a partir de hoje. "
+                "Se disser só o dia da semana (ex.: quinta), é a próxima quinta a partir de hoje.")
         txt += "\nQuem atende em cada dia da semana (pela agenda): " + "; ".join(
             f"{AG.DIAS_LONGOS[w]}: " + (", ".join(x["nome"] for x in AG.profs_com_agenda(conf) if AG.intervalos_do_dia(x, w))
                                        or "ninguém") for w in range(7))
-        txt += "\nSe o paciente disser só o dia do mês (ex.: dia 25), é o próximo dia 25 a partir de hoje."
+        fer = [(d, AG.feriado(d)) for d in prox if AG.feriado(d)]
+        if fer:
+            lista = ", ".join(f"{f(d)} ({nome})" for d, nome in fer)
+            txt += (f"\nFeriados nacionais nesse período: {lista}. "
+                    + ("A clínica atende normalmente nesses dias." if not AG.fecha_no_feriado(conf, fer[0][0])
+                       else "A clínica não atende nesses dias."))
     return txt
 
 
@@ -616,10 +635,64 @@ def ferramentas_agenda(conf: dict) -> list:
 
 
 def _data_param(v: str):
+    """'2026-11-25', '25/11/2026' ou '25/11' (o proximo 25/11) -> date."""
+    v = (v or "").strip()
     try:
-        return datetime.strptime((v or "").strip()[:10], "%Y-%m-%d").date()
+        return datetime.strptime(v[:10], "%Y-%m-%d").date()
+    except ValueError:
+        pass
+    m = re.fullmatch(r"(\d{1,2})/(\d{1,2})(?:/(\d{2,4}))?", v)
+    if not m:
+        return None
+    hoje = agora().date()
+    try:
+        if m.group(3):
+            ano = int(m.group(3))
+            return datetime(ano + 2000 if ano < 100 else ano, int(m.group(2)), int(m.group(1))).date()
+        d = datetime(hoje.year, int(m.group(2)), int(m.group(1))).date()
+        return d if d >= hoje else datetime(hoje.year + 1, d.month, d.day).date()
     except ValueError:
         return None
+
+
+def _hora_param(v: str) -> str:
+    """'9:00', '09:00', '9h', '9h30', '14h00', '14:00:00' -> 'HH:MM' (ou '' se nao entender)."""
+    m = re.fullmatch(r"(\d{1,2})\s*(?:[:h]\s*(\d{2})?)?(?::\d{2})?\s*h?", (v or "").strip().lower())
+    if not m or int(m.group(1)) > 23 or int(m.group(2) or 0) > 59:
+        return ""
+    return f"{int(m.group(1)):02d}:{int(m.group(2) or 0):02d}"
+
+
+def _motivos(slug: str, conf: dict, prof: dict, datas: list, sim: bool, periodo: str = "") -> list:
+    """[(de, ate, motivo)] para os dias sem horario, agrupando dias seguidos com o mesmo motivo."""
+    motivos = []
+    for d in datas:
+        if periodo and AG.livres_no_dia(slug, conf, prof, d, sim):
+            m = "sem horário livre nesse período do dia"
+        else:
+            m = AG.motivo_sem_horario(slug, conf, prof, d, sim)
+        rot = f"{AG.DIAS_CURTOS[d.weekday()]} {d.strftime('%d/%m')}"
+        if motivos and motivos[-1][2] == m and motivos[-1][3] == d - timedelta(days=1):
+            motivos[-1][1], motivos[-1][3] = rot, d
+        else:
+            motivos.append([rot, rot, m, d])
+    return [(a, b, m) for a, b, m, _ in motivos]
+
+
+def _txt_motivos(motivos: list) -> str:
+    return "; ".join((a if a == b else f"{a} a {b}") + f": {m}" for a, b, m in motivos)
+
+
+def _sem_horario(slug: str, conf: dict, prof: dict, ini, dias: int, sim: bool, periodo: str) -> str:
+    """Explica por que nao ha horario, dia a dia (agrupando dias com o mesmo motivo)."""
+    motivos = _motivos(slug, conf, prof, [ini + timedelta(days=i) for i in range(dias)], sim, periodo)
+    partes = [_txt_motivos(motivos)]
+    fim = ini + timedelta(days=dias - 1)
+    txt = (f"Sem horário livre para {prof['nome']} de {ini.strftime('%d/%m')} a {fim.strftime('%d/%m')}. "
+           + "; ".join(partes) + f". {prof['nome']} atende: {AG.resumo_semana(prof)}.")
+    if any("não atende às" in m for _, _, m in motivos):
+        txt += f" Não ofereça {prof['nome']} em dia da semana em que ele não atende."
+    return txt + " Explique o motivo certo ao paciente e ofereça outros dias ou outro profissional."
 
 
 def executar_ferramenta(nome: str, ent: dict, ctx: dict) -> str:
@@ -649,21 +722,25 @@ def executar_ferramenta(nome: str, ent: dict, ctx: dict) -> str:
         linhas = []
         for d, hs in res.items():
             hs = [h for h in hs if faixa[0] <= AG.minutos(h) < faixa[1]]
-            if hs:
-                linhas.append(f"{AG.DIAS_CURTOS[d.weekday()]} {d.strftime('%d/%m')} ({d.isoformat()}): " + ", ".join(hs[:16]))
+            if not hs:
+                continue
+            if dias > 3 and len(hs) > 16:
+                mostra = ", ".join(hs[:16]) + f" (e mais {len(hs) - 16} horários até {hs[-1]}; consulte só esse dia para ver todos)"
+            else:
+                mostra = ", ".join(hs)
+            linhas.append(f"{AG.DIAS_CURTOS[d.weekday()]} {d.strftime('%d/%m')} ({d.isoformat()}): " + mostra)
         if not linhas:
-            fim = ini + timedelta(days=dias - 1)
-            return (f"Sem horário livre para {prof['nome']} de {ini.strftime('%d/%m')} a {fim.strftime('%d/%m')}"
-                    + (" nesse período do dia" if ent.get("periodo") not in (None, "", "qualquer") else "")
-                    + f". {prof['nome']} atende: {AG.resumo_semana(prof)}. Não ofereça {prof['nome']} nesses dias; "
-                    "ofereça outros dias dele ou outro profissional.")
+            periodo = ent.get("periodo") if ent.get("periodo") not in (None, "", "qualquer") else ""
+            return _sem_horario(slug, conf, prof, ini, dias, sim, periodo)
+        faltam = [ini + timedelta(days=i) for i in range(dias)]
+        faltam = [d for d in faltam if d not in res and AG.intervalos_do_dia(prof, d.weekday())]
+        if faltam:
+            linhas.append("Sem horário (dias em que atende): " + _txt_motivos(_motivos(slug, conf, prof, faltam, sim)))
         return f"Horários livres de {prof['nome']} (consulta de {AG.duracao(prof)} min):\n" + "\n".join(linhas)
     if nome == "marcar_consulta":
         d = _data_param(ent.get("data"))
-        hora = (ent.get("hora") or "").strip()[:5]
-        if len(hora) == 4 and hora[1] == ":":
-            hora = "0" + hora
-        if not d or not re.fullmatch(r"\d{2}:\d{2}", hora):
+        hora = _hora_param(ent.get("hora"))
+        if not d or not hora:
             return "Data ou hora em formato inválido. Use AAAA-MM-DD e HH:MM."
         if not (ent.get("nome_paciente") or "").strip():
             return "Falta o nome do paciente. Pergunte antes de marcar."
@@ -671,7 +748,9 @@ def executar_ferramenta(nome: str, ent: dict, ctx: dict) -> str:
             "paciente": ent.get("nome_paciente"), "tel": ctx["tel"], "convenio": ent.get("convenio"),
             "obs": ent.get("observacao")}, sim=sim, por="assistente", origem="assistente")
         if not ok:
-            alt = AG.livres(slug, conf, prof, d, 3, sim)
+            if not AG.livres_no_dia(slug, conf, prof, d, sim):
+                r = f"{r} Motivo: {AG.motivo_sem_horario(slug, conf, prof, d, sim)}."
+            alt = AG.livres(slug, conf, prof, max(d, hoje), 3, sim)
             sug = "; ".join(f"{AG.DIAS_CURTOS[x.weekday()]} {x.strftime('%d/%m')}: " + ", ".join(hs[:6]) for x, hs in alt.items())
             return f"Não marcado: {r}" + (f" Livres perto disso: {sug}" if sug else "")
         ctx["reservas"].append(r)
@@ -1289,6 +1368,11 @@ def html_ag_dia(slug: str, conf: dict, profs: list, d, sim: bool) -> str:
     itens = AG.listar(slug, d, d, sim)
     gerais = [x for x in itens if x.get("tipo") == "bloqueio" and not x.get("prof_id")]
     blocos = []
+    fer = AG.fecha_no_feriado(conf, d)
+    if fer:
+        blocos.append(f'<div class="aviso" style="background:var(--papel);color:var(--txt2)">Feriado: {esc(fer)}. '
+                      'O assistente não oferece horário nesse dia; a equipe ainda pode marcar aqui. '
+                      'Se a clínica atende em feriado, marque isso em Configurações.</div>')
     for x in gerais:
         hr = "dia todo" if x.get("dia_todo") else f"{x['inicio']}–{x['fim']}"
         blocos.append(f'<div class="aviso" style="background:var(--papel);color:var(--txt2)">Todos bloqueados, {hr}'
@@ -1328,7 +1412,9 @@ def html_ag_semana(slug: str, conf: dict, profs: list, d, sim: bool, prof_sel: s
     ids = {p["id"] for p in profs}
     hoje = agora().date()
     cab = "".join(f'<th class="{"hoje" if x == hoje else ""}"><a href="{_link_ag(x, "dia", prof_sel, sim)}">'
-                  f'{AG.DIAS_CURTOS[x.weekday()]} {x.strftime("%d/%m")}</a></th>' for x in dias)
+                  f'{AG.DIAS_CURTOS[x.weekday()]} {x.strftime("%d/%m")}</a>'
+                  + (f'<br><small style="font-weight:400">{esc(AG.fecha_no_feriado(conf, x))}</small>' if AG.fecha_no_feriado(conf, x) else "")
+                  + '</th>' for x in dias)
     cels = []
     for x in dias:
         dd = x.isoformat()
@@ -1667,7 +1753,11 @@ def painel_config(salvo: str = "", s: dict = Depends(exigir_login)):
       <div class="grid2" style="margin-top:6px">
         <div>{campo('ag_antecedencia_h', 'Antecedência mínima para o assistente marcar (horas)', str(AG.ANTECEDENCIA_H_PADRAO))}</div>
         <div>{campo('ag_janela_dias', 'Marcar até quantos dias à frente', str(AG.JANELA_DIAS_PADRAO))}</div>
-      </div></div>
+      </div>
+      <label style="margin-top:10px"><input type="checkbox" name="atende_feriados" value="1"{' checked' if conf.get('atende_feriados') == '1' else ''}>
+        A clínica atende em feriados nacionais (Natal, Ano-Novo, Sexta-feira Santa...)</label>
+      <p style="font-size:13px;color:var(--txt2)">Desmarcado, o assistente não oferece horário nesses dias. Feriado da cidade ou do estado: use Bloquear horário na Agenda.</p>
+      </div>
     <div class="card"><h2>Regras</h2>
       {campo('encaminhar_quando', 'Quando passar para a equipe, além do padrão', 'Pedido de orçamento de implante; paciente pede a Dra. Ana direto', True)}
       {campo('extra', 'Outras informações e regras', 'Primeira consulta de avaliação é gratuita. Não informar preços de tratamento pelo WhatsApp.', True)}
@@ -1689,6 +1779,7 @@ async def painel_config_post(request: Request, s: dict = Depends(exigir_login)):
     conf = obter_conf(slug)
     for ch in ("nome_assistente", "endereco", "funcionamento", "pagamento", "convenios", "encaminhar_quando", "extra"):
         conf[ch] = str(f.get(ch, "")).strip()[:4000]
+    conf["atende_feriados"] = "1" if f.get("atende_feriados") else ""
     for ch, maximo in (("ag_antecedencia_h", 240), ("ag_janela_dias", 180)):
         v = so_digitos(f.get(ch, ""))
         conf[ch] = str(min(int(v), maximo)) if v else ""

@@ -220,3 +220,20 @@ Fluxo: `agenteassume.com.br` → botão Entrar → `app.agenteassume.com.br/entr
 | `ZAPI_PARTNER_TOKEN` | Token de parceiro (integrador) da Z-API. Com ele, a instância da clínica é criada e assinada sozinha depois do pagamento. Usa o `ZAPI_CLIENT_TOKEN` da conta. |
 
 O valor da mensalidade fica em `/admin/clinicas` (card Plano). No Mercado Pago, aponte o webhook de **Assinaturas** para `https://app.agenteassume.com.br/webhook/mercadopago`; mesmo sem ele, o painel confere a assinatura na volta do pagamento e a cada 12 horas.
+
+---
+
+## Testes da agenda e do assistente
+
+Ficam em `tests/` e rodam sozinhos no GitHub a cada push e PR (aba **Actions → Testes da agenda e do assistente**).
+
+- **Regras da agenda (sem IA, grátis):** dias e horários de cada profissional, duração, antecedência, janela de dias,
+  conflitos, bloqueios, cancelar e remarcar, simulação, fuso de São Paulo, feriados nacionais, e o que as ferramentas
+  devolvem ao assistente ("amanhã", "dia 25", "semana que vem", profissional inexistente, hora escrita "9h" etc.).
+- **Conversas com a IA (pacientes simulados):** 12 cenários de paciente conversando com o assistente; cada consulta
+  marcada é conferida contra a agenda e um juiz lê a conversa e aponta erros. Para rodar: cadastre o secret
+  `ANTHROPIC_API_KEY` no repositório e, em Actions, clique em **Run workflow**. O relatório sai como arquivo
+  `relatorio-conversas` na própria execução.
+
+No computador: `pip install -r requirements.txt -r requirements-dev.txt && pytest` (conversas: `ANTHROPIC_API_KEY=... pytest -m ia -s`).
+Para cobrir um bug novo, acrescente um cenário em `tests/test_conversas_ia.py` (lista `CENARIOS`) ou um teste em `tests/test_assistente_ferramentas.py`.

@@ -1,0 +1,46 @@
+name: Testes da agenda e do assistente
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      conversas:
+        description: "Rodar também as conversas com a IA (precisa do secret ANTHROPIC_API_KEY; custa alguns centavos)"
+        type: boolean
+        default: true
+
+jobs:
+  regras:
+    name: Regras da agenda (sem IA)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -r requirements.txt -r requirements-dev.txt
+      - run: pytest -q -m "not ia"
+
+  conversas:
+    name: Conversas com a IA (pacientes simulados)
+    if: github.event_name == 'workflow_dispatch' && inputs.conversas
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -r requirements.txt -r requirements-dev.txt
+      - name: Conversas
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: pytest -m ia -v -rA
+      - name: Guardar o relatório
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: relatorio-conversas
+          path: tests/saida/conversas.md
+          if-no-files-found: ignore
