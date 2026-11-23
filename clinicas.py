@@ -1211,6 +1211,7 @@ async def admin_clinica(slug: str, msg: str = "", admin: str = Depends(exigir_ad
       para o painel ver quando a recepção responde pelo celular (e pausar o assistente naquela conversa).</p>
       <form method="post" action="/admin/clinicas/{slug}/webhook" style="margin-top:10px">
         <button class="btn sec peq">Configurar isso na Z-API automaticamente</button></form>
+      {f'<form method="post" action="/admin/clinicas/{slug}/criar-zapi" style="margin-top:8px"><button class="btn sec peq">Criar e assinar a instância Z-API agora (parceiro)</button></form>' if not zapi_configurada(c) and ZAPI_PARTNER else ''}
     </div>
     <form method="post" action="/admin/clinicas/{slug}" class="card"><h2>Dados</h2>{form_clinica(c)}
       <label>Situação</label><select name="situacao">{''.join(f'<option value="{v}" {"selected" if situacao(c) == v else ""}>{t}</option>' for v, t in SITUACOES.items())}</select>
@@ -1303,6 +1304,8 @@ SMTP_PASS      = os.environ.get("SMTP_PASS", "")
 MP_TOKEN       = os.environ.get("CLINICA_MP_ACCESS_TOKEN") or os.environ.get("MP_ACCESS_TOKEN", "")
 AVISO_EMAIL    = os.environ.get("AVISO_EMAIL", "")
 AVISO_WHATSAPP = os.environ.get("AVISO_WHATSAPP", "")
+ZAPI_PARTNER   = os.environ.get("ZAPI_PARTNER_TOKEN", "")          # token de parceiro (integrador) da Z-API
+ZAPI_CONTA_CT  = os.environ.get("ZAPI_CLIENT_TOKEN", "")           # Client-Token da conta Z-API (vale para todas as instancias)
 REVERIFICAR_H  = 12          # de quanto em quanto tempo o painel confere a assinatura no MP
 
 SITUACOES = {"ativa": "Ativa", "pendente": "Aguardando pagamento", "bloqueada": "Pagamento parado ou cancelado"}
@@ -1573,14 +1576,61 @@ async def aplicar_assinatura(slug: str, dados: dict) -> dict | None:
         c["aviso_pago_enviado"] = True
         salvar_clinica(c)
         donos = ", ".join(u["email"] for u in usuarios_da_clinica(slug))
-        await avisar_equipe_aga(
-            f"Clínica nova pagou: {c['nome']}\nContato: {donos} / {fmt_tel(c.get('recepcao_tel', ''))}\n"
-            f"Criar a instância Z-API dela e preencher em {BASE_URL}/admin/clinicas/{slug} (prazo prometido: 24h).",
-            "Clínica nova pagou: criar o WhatsApp dela")
+        criada = await criar_instancia_zapi(slug) if not zapi_configurada(c) else None
+        if criada is True:
+            await avisar_equipe_aga(
+                f"Clínica nova pagou: {c['nome']}\nContato: {donos} / {fmt_tel(c.get('recepcao_tel', ''))}\n"
+                f"O número dela na Z-API já foi criado e assinado sozinho. Ela conecta lendo o QR Code no painel.",
+                "Clínica nova pagou")
+        else:
+            motivo = f"\nA criação automática falhou: {criada}" if isinstance(criada, str) else ""
+            await avisar_equipe_aga(
+                f"Clínica nova pagou: {c['nome']}\nContato: {donos} / {fmt_tel(c.get('recepcao_tel', ''))}\n"
+                f"Criar a instância Z-API dela e preencher em {BASE_URL}/admin/clinicas/{slug} (prazo prometido: 24h).{motivo}",
+                "Clínica nova pagou: criar o WhatsApp dela")
     elif antes == "ativa" and c["situacao"] == "bloqueada":
-        await avisar_equipe_aga(f"A assinatura da {c['nome']} ficou {status_mp} no Mercado Pago. O assistente dela foi desligado.",
+        extra = (f"\nSe ela não voltar, cancele a instância Z-API dela ({c.get('zapi_instance')}) no painel da Z-API, "
+                 "para não seguir pagando por ela.") if c.get("zapi_instance") else ""
+        await avisar_equipe_aga(f"A assinatura da {c['nome']} ficou {status_mp} no Mercado Pago. O assistente dela foi desligado.{extra}",
                                 "Assinatura parada")
     return c
+
+
+async def criar_instancia_zapi(slug: str) -> bool | str | None:
+    """Cria e assina a instancia Z-API da clinica pela API de parceiro (integrador).
+    Devolve True se deu certo, None se nao ha token de parceiro, ou o texto do erro."""
+    if not ZAPI_PARTNER:
+        return None
+    c = obter_clinica(slug)
+    hd = {"Authorization": f"Bearer {ZAPI_PARTNER}", "Content-Type": "application/json"}
+    corpo = {"name": f"aga-{slug}"[:60], "sessionName": c["nome"][:60], "receivedCallbackUrl": url_webhook(c),
+             "isDevice": False, "businessDevice": True}
+    try:
+        async with httpx.AsyncClient(timeout=30) as http:
+            r1 = await http.post("https://api.z-api.io/instances/integrator/on-demand", headers=hd, json=corpo)
+            d = r1.json() if r1.status_code < 300 else {}
+            if not d.get("id") or not d.get("token"):
+                return f"criar instância: {r1.status_code} {r1.text[:200]}"
+            c = obter_clinica(slug)
+            c.update({"zapi_instance": d["id"], "zapi_token": d["token"], "zapi_client_token": ZAPI_CONTA_CT,
+                      "zapi_criada_em": agora().isoformat(timespec="seconds"), "zapi_assinada": False})
+            salvar_clinica(c)
+            r2 = await http.post(f"https://api.z-api.io/instances/{d['id']}/token/{d['token']}/integrator/on-demand/subscription",
+                                 headers=hd, json={})
+            if r2.status_code >= 300:
+                return f"instância {d['id']} criada, mas a assinatura falhou ({r2.status_code} {r2.text[:200]}). Sem assinar, ela some em 2 dias."
+            c = obter_clinica(slug)
+            c["zapi_assinada"] = True
+            salvar_clinica(c)
+        if ZAPI_CONTA_CT:
+            try:
+                await configurar_webhook_zapi(obter_clinica(slug))   # liga "notificar enviadas por mim"
+            except Exception as e:
+                print(f"ZAPI webhook {slug}: {e}")
+        print(f"ZAPI instancia criada e assinada para {slug}: {d['id']}")
+        return True
+    except Exception as e:
+        return f"{type(e).__name__}: {e}"
 
 
 async def reverificar_assinatura(c: dict) -> dict:
@@ -1717,3 +1767,15 @@ async def painel_whatsapp(s: dict = Depends(exigir_login)):
     corpo = f'<div class="card" style="max-width:520px"><h2>Conectar o WhatsApp da clínica</h2>{miolo}</div>'
     head = '<meta http-equiv="refresh" content="20">' if st["estado"] != "conectado" else ""
     return html_resp(pagina("WhatsApp", corpo, s, "painel", head))
+
+
+@router.post("/admin/clinicas/{slug}/criar-zapi")
+async def admin_criar_zapi(slug: str, admin: str = Depends(exigir_admin)):
+    c = obter_clinica(slug)
+    if not c:
+        raise HTTPException(status_code=404)
+    if zapi_configurada(c):
+        return RedirectResponse(f"/admin/clinicas/{slug}?msg=Essa+clinica+ja+tem+Z-API.", status_code=303)
+    res = await criar_instancia_zapi(slug)
+    msg = "Instancia criada e assinada." if res is True else f"Nao deu: {res or 'falta ZAPI_PARTNER_TOKEN'}"
+    return RedirectResponse(f"/admin/clinicas/{slug}?msg=" + quote(msg), status_code=303)

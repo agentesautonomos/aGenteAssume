@@ -216,5 +216,6 @@ Fluxo: `agenteassume.com.br` → botão Entrar → `app.agenteassume.com.br/entr
 | `RESEND_API_KEY` ou `BREVO_API_KEY` | Envio de e-mail por API (o plano Hobby do Railway bloqueia SMTP) |
 | `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASS` | Envio por SMTP (só no plano Pro do Railway) |
 | `AVISO_EMAIL`, `AVISO_WHATSAPP` | Onde vocês recebem "clínica nova pagou" |
+| `ZAPI_PARTNER_TOKEN` | Token de parceiro (integrador) da Z-API. Com ele, a instância da clínica é criada e assinada sozinha depois do pagamento. Usa o `ZAPI_CLIENT_TOKEN` da conta. |
 
 O valor da mensalidade fica em `/admin/clinicas` (card Plano). No Mercado Pago, aponte o webhook de **Assinaturas** para `https://app.agenteassume.com.br/webhook/mercadopago`; mesmo sem ele, o painel confere a assinatura na volta do pagamento e a cada 12 horas.
