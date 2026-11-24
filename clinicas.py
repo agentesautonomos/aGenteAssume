@@ -1020,7 +1020,7 @@ def revisar_resposta(texto: str, hoje=None, conf=None, hora=None) -> tuple:
     fala = "\n".join(l for l in texto.split("\n") if not l.strip().startswith("["))
 
     problemas = []
-    for frase in re.split(r"(?<!Dr)(?<!Dra)(?<=[.!?])\s+|\n", fala):
+    for frase in re.split(r"(?<!Dr\.)(?<!Dra\.)(?<=[.!?])\s+|\n", fala):
         datas = [d for d in (_data_de(int(a), int(b), hoje) for a, b in _RE_DATA.findall(frase)) if d]
         for m in _RE_RELATIVO.finditer(frase):
             palavra = m.group(1).lower().replace("amanha", "amanhã")
