@@ -297,10 +297,11 @@ def estatisticas(slug: str, dias: int) -> dict:
     hoje = agora().date()
     datas = [(hoje - timedelta(days=i)).strftime("%Y-%m-%d") for i in range(dias)]
     pacientes = R.sunion([K(slug, "dia", d) for d in datas]) if datas else set()
-    tot = {"conversas": len(pacientes), "respostas": 0, "agendamentos": 0, "encaminhados": 0}
+    campos = ("respostas", "agendamentos", "remarcacoes", "cancelamentos", "encaminhados")
+    tot = {"conversas": len(pacientes), **{c: 0 for c in campos}}
     for d in datas:
         h = R.hgetall(K(slug, "stats", d))
-        for campo in ("respostas", "agendamentos", "encaminhados"):
+        for campo in campos:
             tot[campo] += int(h.get(campo, 0))
     return tot
 
@@ -583,7 +584,13 @@ def montar_prompt(c: dict, conf: dict) -> str:
             "dia, data, hora, profissional e endereço.",
             "Se a ferramenta disser que o horário não está mais livre, peça desculpas e ofereça outros.",
             "Para saber se o paciente já tem consulta marcada, use consultas_do_paciente.",
-            "Remarcar ou cancelar consulta: passe para a equipe.",
+            "Remarcar: use consultas_do_paciente para achar a consulta (se houver mais de uma, pergunte qual), "
+            "pergunte o dia e período que prefere, consulte ver_horarios_livres, ofereça as opções e, quando ele escolher, "
+            "chame remarcar_consulta e confirme o novo dia, data, hora e profissional. Não peça nome nem convênio de novo.",
+            "Cancelar: use consultas_do_paciente, confirme qual consulta é (dia e hora) se não estiver claro, chame "
+            "cancelar_consulta e confirme o cancelamento; depois ofereça remarcar para outro dia, sem insistir.",
+            f"Pelo WhatsApp só dá para remarcar ou cancelar até {AG.antecedencia_mudar(conf)} horas antes da consulta. "
+            "Se faltar menos, diga isso com gentileza e passe para a equipe.",
         ]
         outros = [x for x in profs if not AG.tem_agenda(x)]
         if outros:
@@ -607,7 +614,8 @@ def montar_prompt(c: dict, conf: dict) -> str:
         "",
         "=== PASSAR PARA A EQUIPE ===",
         "Encaminhe para a equipe quando: o paciente pedir para falar com uma pessoa; houver urgência, dor forte ou reclamação; "
-        "a pergunta for sobre algo que não está nas informações acima; ou for remarcar ou cancelar consulta.",
+        "a pergunta for sobre algo que não está nas informações acima; ou for remarcar ou cancelar consulta "
+        "sem acesso à agenda ou em cima da hora.",
     ]
     if conf.get("encaminhar_quando"):
         p.append(f"Também encaminhe quando: {conf['encaminhar_quando']}")
@@ -729,8 +737,24 @@ def ferramentas_agenda(conf: dict) -> list:
              "observacao": {"type": "string", "description": "Opcional. Motivo ou observação, só se o paciente contou (não pergunte)."}},
              "required": ["profissional", "data", "hora", "nome_paciente"]}},
         {"name": "consultas_do_paciente",
-         "description": "Lista as próximas consultas já marcadas para este paciente (deste número de WhatsApp).",
+         "description": "Lista as próximas consultas já marcadas para este paciente (deste número de WhatsApp), com o código de cada uma. "
+                        "Use antes de remarcar ou cancelar.",
          "input_schema": {"type": "object", "properties": {}}},
+        {"name": "remarcar_consulta",
+         "description": "Muda uma consulta já marcada deste paciente para outro dia/horário que apareceu como livre e que o paciente escolheu. "
+                        "O horário antigo fica livre na hora.",
+         "input_schema": {"type": "object", "properties": {
+             "consulta": {"type": "string", "description": "Código da consulta, como aparece em consultas_do_paciente."},
+             "profissional": {**prof, "description": "Profissional da nova consulta (normalmente o mesmo)."},
+             "data": {"type": "string", "description": "Novo dia, AAAA-MM-DD"},
+             "hora": {"type": "string", "description": "Nova hora, HH:MM, um dos horários livres"}},
+             "required": ["consulta", "profissional", "data", "hora"]}},
+        {"name": "cancelar_consulta",
+         "description": "Cancela uma consulta já marcada deste paciente, quando ele pediu para cancelar e confirmou qual.",
+         "input_schema": {"type": "object", "properties": {
+             "consulta": {"type": "string", "description": "Código da consulta, como aparece em consultas_do_paciente."},
+             "motivo": {"type": "string", "description": "Opcional. O motivo, só se o paciente contou (não pergunte)."}},
+             "required": ["consulta"]}},
     ]
 
 
@@ -861,7 +885,16 @@ def executar_ferramenta(nome: str, ent: dict, ctx: dict) -> str:
         itens = AG.consultas_do_tel(slug, ctx["tel"], sim)
         if not itens:
             return "Nenhuma consulta marcada para este paciente."
-        return "\n".join(f"- {AG.quando_txt(x)} com {x['prof_nome']} ({x.get('paciente') or 'sem nome'})" for x in itens)
+        hoje = agora().date()
+        linhas = []
+        for x in itens:
+            trava_txt = AG.pode_mudar(conf, x)
+            linhas.append(f"- código {x['id']}: {dia_falado(date.fromisoformat(x['data']), hoje)} às {hora_falada(x['inicio'])} "
+                          f"com {nome_conversa(x['prof_nome'])}, paciente {x.get('paciente') or 'sem nome'}"
+                          + (f" [não pode remarcar/cancelar pelo WhatsApp: {trava_txt}]" if trava_txt else ""))
+        return "\n".join(linhas)
+    if nome in ("remarcar_consulta", "cancelar_consulta"):
+        return _mudar_consulta(nome, ent, ctx)
     if nome == "ver_horarios_livres" and not (ent.get("profissional") or "").strip():
         ctx["_achados"] = []
         partes = [executar_ferramenta(nome, {**ent, "profissional": x["id"]}, ctx) for x in AG.profs_com_agenda(conf)]
@@ -932,6 +965,50 @@ def executar_ferramenta(nome: str, ent: dict, ctx: dict) -> str:
         ctx["reservas"].append(r)
         return f"Consulta marcada: {AG.quando_txt(r)} com {r['prof_nome']}, paciente {r['paciente']}."
     return "Ferramenta desconhecida."
+
+
+def _consulta_do_paciente(ctx: dict, codigo: str):
+    codigo = (codigo or "").strip()
+    for x in AG.consultas_do_tel(ctx["slug"], ctx["tel"], ctx["sim"]):
+        if x["id"] == codigo:
+            return x
+    return None
+
+
+def _mudar_consulta(nome: str, ent: dict, ctx: dict) -> str:
+    slug, conf, sim = ctx["slug"], ctx["conf"], ctx["sim"]
+    it = _consulta_do_paciente(ctx, ent.get("consulta"))
+    if not it:
+        return "Consulta não encontrada para este paciente. Use consultas_do_paciente para ver os códigos."
+    trava_txt = AG.pode_mudar(conf, it)
+    if trava_txt:
+        return (f"Não alterado: {trava_txt} Diga isso ao paciente com gentileza e passe para a equipe "
+                "(inclua a linha [ENCAMINHAR: ...]).")
+    antes = f"{AG.quando_txt(it)} com {it['prof_nome']}"
+    if nome == "cancelar_consulta":
+        novo = AG.cancelar(slug, it["id"], por="assistente")
+        if not novo:
+            return "Não foi possível cancelar agora. Passe para a equipe."
+        if (ent.get("motivo") or "").strip():
+            novo["motivo_cancelamento"] = ent["motivo"].strip()[:300]
+            AG._gravar(slug, novo)
+        ctx.setdefault("mudancas", []).append({"acao": "cancelada", "item": novo, "antes": antes, "motivo": ent.get("motivo") or ""})
+        return f"Consulta cancelada: {antes}. Confirme ao paciente e, se fizer sentido, ofereça remarcar."
+    prof = AG.achar_prof(conf, ent.get("profissional", "")) or AG.achar_prof(conf, it["prof_id"])
+    if not prof or not AG.tem_agenda(prof):
+        return "Profissional não encontrado na agenda. Use um destes: " + ", ".join(x["nome"] for x in AG.profs_com_agenda(conf))
+    d = _data_param(ent.get("data"))
+    hora = _hora_param(ent.get("hora"))
+    if not d or not hora:
+        return "Data ou hora em formato inválido. Use AAAA-MM-DD e HH:MM."
+    ok, r = AG.mover(slug, conf, it["id"], prof, d, hora, por="assistente")
+    if not ok:
+        alt = AG.livres(slug, conf, prof, max(d, agora().date()), 3, sim)
+        sug = "; ".join(f"{dia_falado(x)}: " + ", ".join(hs[:6]) for x, hs in alt.items())
+        return f"Não remarcado: {r}" + (f" Livres perto disso: {sug}" if sug else "")
+    ctx.setdefault("mudancas", []).append({"acao": "remarcada", "item": r, "antes": antes})
+    return (f"Consulta remarcada: era {antes}; agora {dia_falado(d)} às {hora_falada(r['inicio'])} com "
+            f"{nome_conversa(r['prof_nome'])}. O horário antigo foi liberado. Confirme ao paciente.")
 
 
 def _bloco_para_param(b) -> dict:
@@ -1146,7 +1223,7 @@ def ler_estado(msgs: list, conf: dict, chave_tokens: str) -> dict:
         "- convenio: \"particular\" ou o nome do convênio que ele disse que vai usar.\n"
         "- perguntas: o que a ÚLTIMA mensagem do paciente pergunta ou pede que precisa de resposta direta "
         "(ex.: \"atende Amil?\", \"tem às 9h hoje?\", \"quanto custa?\"). Lista vazia se não perguntou nada.\n"
-        "- fora_do_agendamento: true se ele quer outra coisa que não marcar consulta (remarcar, cancelar, falar com uma pessoa, "
+        "- fora_do_agendamento: true se ele quer outra coisa que não marcar uma consulta nova (remarcar, cancelar, falar com uma pessoa, "
         "urgência, reclamação, só uma informação).\n"
         "- ja_marcado: true se a clínica já confirmou a consulta marcada nesta conversa e ele não pediu outra.")
     return _ia_aux(pedido, chave_tokens)
@@ -1329,6 +1406,17 @@ def aviso_consulta(it: dict, tel: str) -> str:
             f"Ver na agenda: {BASE_URL}/painel/agenda?d={it['data']}")
 
 
+def aviso_mudanca(m: dict, tel: str) -> str:
+    it = m["item"]
+    if m["acao"] == "remarcada":
+        return (f"Consulta remarcada pelo assistente.\nPaciente: {it.get('paciente') or fmt_tel(tel)} ({fmt_tel(tel)})\n"
+                f"Era: {m['antes']}\nAgora: {AG.quando_txt(it)} com {it['prof_nome']}\n"
+                f"Ver na agenda: {BASE_URL}/painel/agenda?d={it['data']}")
+    return (f"Consulta cancelada pelo assistente.\nPaciente: {it.get('paciente') or fmt_tel(tel)} ({fmt_tel(tel)})\n"
+            f"Era: {m['antes']}" + (f"\nMotivo: {m['motivo']}" if m.get("motivo") else "")
+            + "\nO horário ficou livre na agenda.")
+
+
 async def responder_paciente(slug: str, tel: str):
     c = obter_clinica(slug)
     if not c or not c.get("bot_ativo") or c.get("desativada") or situacao(c) != "ativa":
@@ -1359,6 +1447,9 @@ async def responder_paciente(slug: str, tel: str):
     for it in ctx["reservas"]:
         contar(slug, "agendamentos")
         await avisar_recepcao(c, aviso_consulta(it, tel))
+    for m in ctx.get("mudancas", []):
+        contar(slug, "remarcacoes" if m["acao"] == "remarcada" else "cancelamentos")
+        await avisar_recepcao(c, aviso_mudanca(m, tel))
     if pedido:
         criar_pedido(slug, tel, pedido)
         await avisar_recepcao(c, (
@@ -1516,7 +1607,7 @@ h1,h2,h3{font-family:'Bricolage Grotesque',system-ui,sans-serif;letter-spacing:-
 @media(max-width:700px){.status{grid-template-columns:1fr}}
 .ponto{width:10px;height:10px;border-radius:50%;display:inline-block;flex:none}
 .p-ok{background:#2E7DDB}.p-mal{background:var(--alerta)}.p-off{background:#A0AEC0}
-.stats{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-bottom:16px}
+.stats{display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin-bottom:16px}
 @media(max-width:700px){.stats{grid-template-columns:repeat(2,1fr)}}
 .stat{background:var(--branco);border:1px solid var(--linha);border-radius:var(--raio);padding:14px 16px}
 .stat .n{font-family:'JetBrains Mono',monospace;font-size:28px;font-weight:600}
@@ -1895,6 +1986,8 @@ async def painel(request: Request, p: int = 7, msg: str = "", s: dict = Depends(
       <div class="stat"><div class="n">{est['conversas']}</div><div class="r">pacientes atendidos</div></div>
       <div class="stat"><div class="n">{est['respostas']}</div><div class="r">respostas do assistente</div></div>
       <div class="stat"><div class="n">{est['agendamentos']}</div><div class="r">agendamentos</div></div>
+      <div class="stat"><div class="n">{est['remarcacoes']}</div><div class="r">remarcadas pelo assistente</div></div>
+      <div class="stat"><div class="n">{est['cancelamentos']}</div><div class="r">canceladas pelo assistente</div></div>
       <div class="stat"><div class="n">{est['encaminhados']}</div><div class="r">passados para a equipe</div></div>
     </div>
     <div class="card"><h2>Esperando a equipe <span class="tag {'ag' if n_fila else ''}">{n_fila}</span></h2>{html_fila(slug)}</div>
@@ -2710,7 +2803,9 @@ def painel_config(salvo: str = "", logo: str = "", s: dict = Depends(exigir_logi
       <div class="grid2">
         <div>{campo('ag_antecedencia_h', 'Antecedência mínima para o assistente marcar (horas)', str(AG.ANTECEDENCIA_H_PADRAO))}</div>
         <div>{campo('ag_janela_dias', 'Marcar até quantos dias à frente', str(AG.JANELA_DIAS_PADRAO))}</div>
+        <div>{campo('ag_antecedencia_mudar_h', 'Remarcar ou cancelar pelo assistente até quantas horas antes', str(AG.ANTECEDENCIA_MUDAR_H_PADRAO))}</div>
       </div>
+      <p style="font-size:13px;color:var(--txt2)">Mais perto da consulta que isso, o assistente passa o pedido de remarcar ou cancelar para a equipe.</p>
       <label style="margin-top:14px;display:flex;gap:8px;align-items:flex-start;color:var(--tinta);font-size:14.5px"><input type="checkbox" name="atende_feriados" value="1"{' checked' if conf.get('atende_feriados') == '1' else ''} style="margin-top:4px">
         <span>A clínica atende em feriados nacionais (Natal, Ano-Novo, Sexta-feira Santa...)</span></label>
       <p style="font-size:13px;color:var(--txt2)">Desmarcado, o assistente não oferece horário nesses dias. Feriado da cidade ou do estado: use Bloquear horário na Agenda.</p>
@@ -2719,7 +2814,7 @@ def painel_config(salvo: str = "", logo: str = "", s: dict = Depends(exigir_logi
       {campo('encaminhar_quando', 'Quando passar para a equipe, além do padrão', 'Pedido de orçamento de implante; paciente pede a Dra. Ana direto', True)}
       {campo('extra', 'Outras informações e regras', 'Primeira consulta de avaliação é gratuita. Não informar preços de tratamento pelo WhatsApp.', True)}
       <p style="font-size:13px;color:var(--txt2);margin-top:8px">Por padrão o assistente já passa para a equipe quando o paciente pede uma pessoa,
-      em urgência ou dor forte, reclamação, remarcação, cancelamento ou pergunta que não está aqui.</p>
+      em urgência ou dor forte, reclamação, remarcação ou cancelamento em cima da hora, ou pergunta que não está aqui.</p>
     </div>
     <div class="linha" style="margin-bottom:16px"><button class="btn">Salvar</button>
       <a href="/painel/experimentar" style="font-size:14px">Ver como ele responde</a></div>
@@ -2738,7 +2833,7 @@ async def painel_config_post(request: Request, s: dict = Depends(exigir_login)):
     for ch in ("nome_assistente", "endereco", "funcionamento", "pagamento", "convenios", "encaminhar_quando", "extra"):
         conf[ch] = str(f.get(ch, "")).strip()[:4000]
     conf["atende_feriados"] = "1" if f.get("atende_feriados") else ""
-    for ch, maximo in (("ag_antecedencia_h", 240), ("ag_janela_dias", 180)):
+    for ch, maximo in (("ag_antecedencia_h", 240), ("ag_janela_dias", 180), ("ag_antecedencia_mudar_h", 720)):
         v = so_digitos(f.get(ch, ""))
         conf[ch] = str(min(int(v), maximo)) if v else ""
     # os profissionais têm tela própria (/painel/profissionais): aqui não mexe neles
@@ -3687,6 +3782,12 @@ async def exp_responder(c: dict):
     texto, motivo, pedido = interpretar_resposta(bruto)
     if texto:
         exp_registrar(slug, "assistente", texto)
+    for m in ctx.get("mudancas", []):
+        exp_registrar(slug, "nota", (
+            f"Consulta de simulação {m['acao']}: era {m['antes']}"
+            + (f"; agora {AG.quando_txt(m['item'])} com {m['item']['prof_nome']}" if m["acao"] == "remarcada" else "")
+            + ". Com o assistente ligado, isso mudaria a agenda de verdade, a recepção receberia o aviso no WhatsApp "
+            "e entraria na contagem do painel."))
     for it in ctx["reservas"]:
         exp_registrar(slug, "nota", (
             f"Reserva de simulação na agenda: {it.get('paciente') or 'paciente'}, {AG.quando_txt(it)} com {it['prof_nome']}. "

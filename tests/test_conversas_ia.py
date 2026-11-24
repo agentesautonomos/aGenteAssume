@@ -56,8 +56,17 @@ CENARIOS = [
     ("convenio_que_nao_atende", ["Vocês aceitam Amil? Queria consulta com o Dr. Fabio pelo Amil."],
      "A clínica só aceita Unimed Odonto e o Fabio só atende particular. Não pode dizer que aceita Amil; "
      "pode oferecer particular ou passar para a equipe.", None),
-    ("remarcar", ["Preciso remarcar minha consulta de terça"],
-     "Remarcar é com a equipe: deve avisar que vai passar para a equipe e encaminhar. Não pode remarcar sozinho.", None),
+    ("remarcar", ["Preciso remarcar minha consulta de quinta", "Pode ser sexta de manhã", "Às 9h"],
+     "O paciente tem consulta com a Dra. Ana quinta 26/11 às 9h. Deve achar essa consulta (consultas_do_paciente), "
+     "oferecer horários livres de verdade da Ana na sexta 27/11 de manhã e, quando ele escolher 9h, remarcar com "
+     "remarcar_consulta e confirmar sexta 27/11 às 9h com a Dra. Ana. Não pode pedir nome nem convênio de novo, nem encaminhar.", None),
+    ("cancelar", ["Quero cancelar minha consulta com o Dr. Fabio"],
+     "O paciente tem consulta com o Dr. Fabio quinta 26/11 às 14h. Deve cancelar com cancelar_consulta (só há uma, "
+     "não precisa perguntar qual) e confirmar o cancelamento de quinta 26/11 às 14h. Pode oferecer remarcar, sem insistir. "
+     "Não pode encaminhar para a equipe.", None),
+    ("remarcar_em_cima_da_hora", ["Preciso remarcar minha consulta de amanhã"],
+     "Agora é segunda 23/11 10h e a consulta é terça 24/11 às 9h, com a Dra. Ana: faltam menos de 24 horas. "
+     "Não pode remarcar sozinho: deve dizer com gentileza que, tão perto da consulta, quem remarca é a equipe, e encaminhar.", None),
     ("natal", ["Tem horário dia 25 de dezembro com a Dra. Ana?"],
      "Agora é 20/12. 25/12 é Natal, a clínica não atende. Deve dizer isso e oferecer outro dia real.",
      datetime(2026, 12, 20, 13, 0, tzinfo=timezone.utc)),
@@ -89,6 +98,13 @@ CENARIOS = [
      "Não há preço nas informações da clínica. Não pode inventar preço; deve dizer que a equipe informa e encaminhar.", None),
 ]
 
+
+# consultas que o paciente ja tem antes da conversa: (profissional, dia, hora)
+PREVIAS = {
+    "remarcar": [("ana1", "2026-11-26", "09:00")],
+    "cancelar": [("fab1", "2026-11-26", "14:00")],
+    "remarcar_em_cima_da_hora": [("ana1", "2026-11-24", "09:00")],
+}
 
 # cenarios que mudam o cadastro da clinica antes da conversa
 AJUSTES = {
@@ -200,6 +216,10 @@ def test_conversa(nome, mensagens, esperado, instante, conf, relogio, monkeypatc
         for x in conf["profissionais"]:
             x["nome"] = AJUSTES[base].get(x["id"], x["nome"])
         CL.salvar_conf(SLUG, conf)
+    for pid, dia, hora in PREVIAS.get(base, []):
+        ok, _ = AG.reservar(SLUG, conf, AG.achar_prof(conf, pid), date.fromisoformat(dia), hora,
+                            {"paciente": "Paulo Reis", "tel": CL.EXP_TEL, "convenio": "particular"}, sim=True)
+        assert ok
     chamadas = []
     original = CL.executar_ferramenta
 
@@ -230,6 +250,10 @@ def test_conversa(nome, mensagens, esperado, instante, conf, relogio, monkeypatc
         if pedido:
             linhas.append(f"[anotou pedido para a recepção: {pedido}]")
         reservas += ctx["reservas"]
+        for m in ctx.get("mudancas", []):
+            linhas.append(f"[consulta {m['acao']} na agenda: era {m['antes']}"
+                          + (f"; agora {AG.quando_txt(m['item'])} com {m['item']['prof_nome']}" if m["acao"] == "remarcada" else "")
+                          + "]")
         revisoes_por_msg.append(ctx.get("revisoes", []))
         for r in ctx.get("revisoes", []):
             linhas.insert(len(linhas) - 1, f"[revisão automática pediu para reescrever: {'; '.join(r)}]")
