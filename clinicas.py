@@ -1080,7 +1080,7 @@ def _confere_dias_de_atendimento(fala: str, conf: dict) -> list:
     return problemas
 
 
-def revisar_resposta(texto: str, hoje=None, conf=None, hora=None) -> tuple:
+def revisar_resposta(texto: str, hoje=None, conf=None, hora=None, ja_marcadas=()) -> tuple:
     """Confere a resposta antes de mandar ao paciente.
     Corrige sozinho o que da para corrigir com certeza (dia da semana errado ao lado de uma data) e
     devolve (texto_corrigido, problemas) com o que a IA precisa reescrever."""
@@ -1130,8 +1130,8 @@ def revisar_resposta(texto: str, hoje=None, conf=None, hora=None) -> tuple:
                                  f"({ini.strftime('%d/%m')} a {fim.strftime('%d/%m')}); escreva só o dia e a data")
     if conf:
         problemas += _confere_dias_de_atendimento(fala, conf)
-    horas = {(int(a), int(b or c or 0)) for a, b, c in _RE_HORA.findall(fala)}
-    if len(horas) > 3:
+    horas = {(int(a), int(b or c or 0)) for a, b, c in _RE_HORA.findall(fala)} - set(ja_marcadas)
+    if len(horas) > 3:   # o horario da consulta que o paciente ja tem (remarcar) nao conta como oferta
         problemas.append(f"ofereceu {len(horas)} horários; ofereça no máximo 3 no total")
     if fala.count("?") > 1:
         problemas.append("fez mais de uma pergunta; deixe só uma")
@@ -1143,6 +1143,10 @@ def revisar_resposta(texto: str, hoje=None, conf=None, hora=None) -> tuple:
         if _RE_HORA.search(frase) and re.search(r"\b(hoje|amanh[ãa])\b", frase, re.I) and not _RE_DATA.search(frase):
             problemas.append("ofereceu horário de hoje/amanhã sem a data; escreva o dia como a agenda escreve (ex.: hoje, segunda 23/11)")
             break
+    if not RE_ENC.search(texto) and not RE_AG.search(texto) and re.search(
+            r"\b(vou passar|vou anotar|anotei|passei)\b.{0,80}\b(recep[çc][ãa]o|equipe)\b", fala, re.I):
+        problemas.append("disse que vai passar para a recepção/equipe mas faltou a linha [AGENDAMENTO: ...] "
+                         "(pedido de horário) ou [ENCAMINHAR: ...] no fim da mensagem")
     if RE_ENC.search(texto):
         if "?" in fala:
             problemas.append("ao passar para a equipe, não faça perguntas nem siga o atendimento: só avise que a equipe continua")
@@ -1333,6 +1337,8 @@ def conferir_resposta(etapa: str, msgs: list, agenda: list, rascunho: str, chave
         "Dia sem atendimento: tem que dizer.)\n"
         "2) A mensagem faz o passo pedido acima, sem pular para outro e sem pedir coisa que o paciente já disse?\n"
         "3) Algum dia, data, hora, profissional ou convênio contradiz o que a agenda respondeu?\n"
+        "Passar para a equipe (linha [ENCAMINHAR: ...]) o que não está nas informações da clínica, como preço, já é responder: "
+        "não peça para dar a informação. "
         "Só aponte contradição com a agenda quando a agenda disser o contrário; se a agenda não fala do assunto, não aponte. "
         "Nunca peça para tirar uma informação verdadeira nem a resposta a algo que o paciente disse ou perguntou "
         "(ex.: dizer que um profissional não existe na clínica, que um horário já passou, que não há agenda para alguém).\n"
@@ -1340,6 +1346,20 @@ def conferir_resposta(etapa: str, msgs: list, agenda: list, rascunho: str, chave
         "dizendo o que corrigir.")
     v = _ia_aux(pedido, chave_tokens, 300)
     return [str(x) for x in (v.get("problemas") or []) if str(x).strip()]
+
+
+def _horas_ja_marcadas(ctx: dict, agenda: list) -> set:
+    """Horarios das consultas que o paciente ja tem (ou tinha, antes de remarcar/cancelar): citar nao e oferecer."""
+    out = set()
+    try:
+        for x in AG.consultas_do_tel(ctx["slug"], ctx.get("tel", ""), ctx.get("sim", False)):
+            out.add((AG.minutos(x["inicio"]) // 60, AG.minutos(x["inicio"]) % 60))
+    except Exception:
+        pass
+    for h, m in re.findall(r"às (\d{1,2})(?:h|:)(\d{2})?", "\n".join(
+            x for x in agenda if x.startswith(("remarcar_consulta", "cancelar_consulta")))):
+        out.add((int(h), int(m or 0)))
+    return out
 
 
 async def conversar_ia(system: str, msgs: list, ctx: dict, chave_tokens: str) -> str:
@@ -1376,7 +1396,12 @@ async def conversar_ia(system: str, msgs: list, ctx: dict, chave_tokens: str) ->
                 # a reescrita falou do sistema em vez de falar com o paciente: fica com o rascunho anterior
                 print(f"CLINICA {ctx['slug']} reescrita descartada: {final[:120]!r}")
                 return rascunho
-            final, problemas = revisar_resposta(final, conf=ctx.get("conf"))
+            if rascunho and RE_ENC.search(rascunho) and not RE_ENC.search(final):
+                # a reescrita perdeu o encaminhamento para a equipe: fica com o rascunho que encaminhava
+                print(f"CLINICA {ctx['slug']} reescrita sem encaminhamento descartada: {final[:120]!r}")
+                return rascunho
+            marcadas = _horas_ja_marcadas(ctx, agenda)
+            final, problemas = revisar_resposta(final, conf=ctx.get("conf"), ja_marcadas=marcadas)
             rascunho = final
             if not problemas and CONFERENTE_LIGADO and revisoes < 2 and final:
                 try:
