@@ -86,3 +86,24 @@ def test_prompt_ensina_a_remarcar_e_a_regra_de_antecedencia(conf):
     p = CL.montar_prompt({"slug": SLUG, "nome": "Clínica"}, conf)
     assert "remarcar_consulta" in p and "24 horas antes" in p
     assert "Remarcar ou cancelar consulta: passe para a equipe" not in p
+
+
+def test_horario_da_consulta_atual_nao_conta_como_oferta(conf):
+    marcar(conf)   # quinta 26/11 9h
+    t = "Sua consulta é quinta 26/11 às 9h. Na sexta 27/11 tenho 8h, 10h ou 11h30. Qual prefere?"
+    _, p = CL.revisar_resposta(t, ja_marcadas=CL._horas_ja_marcadas(ctx_de(conf), []))
+    assert not any("horários" in x for x in p)
+    _, p = CL.revisar_resposta(t)
+    assert any("ofereceu 4 horários" in x for x in p)
+
+
+def test_disse_que_passa_para_a_recepcao_sem_a_linha():
+    _, p = CL.revisar_resposta("Vou passar o seu pedido para a recepção confirmar o horário.")
+    assert any("faltou a linha" in x for x in p)
+    _, p = CL.revisar_resposta("Vou passar o seu pedido para a recepção.\n[AGENDAMENTO: Lia | Dr. Carlos | sábado | particular | ]")
+    assert not any("faltou a linha" in x for x in p)
+
+
+def test_revisao_pega_posso_remarcar():
+    _, p = CL.revisar_resposta("Tenho às 9h na sexta. Posso remarcar para sexta 27/11 às 9h?")
+    assert any("licença" in x for x in p)

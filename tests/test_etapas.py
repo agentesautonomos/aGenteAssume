@@ -143,3 +143,13 @@ def test_horario_so_pedido_manda_conferir_na_agenda(conf):
 def test_revisao_pega_posso_te_oferecer():
     _, p = CL.revisar_resposta("Posso te oferecer outro horário amanhã.")
     assert any("licença" in x for x in p)
+
+
+def test_reescrita_que_perde_o_encaminhamento_e_descartada(conf, monkeypatch):
+    f = Falso(["A equipe te passa o valor por aqui. Qual dia prefere?\n[ENCAMINHAR: preço]",
+               "Quem faz clareamento é a Dra. Ana."], [])
+    monkeypatch.setattr(CL, "claude", lambda: f)
+    monkeypatch.setattr(CL, "MODELO", "outro-modelo")
+    ctx = {"slug": SLUG, "conf": conf, "tel": CL.EXP_TEL, "sim": True, "reservas": []}
+    r = asyncio.run(CL.conversar_ia("SYS", [{"role": "user", "content": "Quanto custa?"}], ctx, CL.K(SLUG, "tk")))
+    assert "[ENCAMINHAR: preço]" in r
