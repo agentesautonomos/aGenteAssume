@@ -25,7 +25,8 @@ from conftest import CLINICA, SLUG
 pytestmark = [pytest.mark.ia, pytest.mark.skipif(not os.environ.get("ANTHROPIC_API_KEY"),
                                                  reason="sem ANTHROPIC_API_KEY: conversas com a IA não rodam")]
 
-MODELO_JUIZ = os.environ.get("JUIZ_MODEL", "claude-opus-5-5")
+# avaliador barato de proposito: cada conversa avaliada custa ~US$ 0,001 (o Opus custava ~US$ 0,05)
+MODELO_JUIZ = os.environ.get("JUIZ_MODEL", "claude-haiku-5-5")
 SAIDA = os.path.join(os.path.dirname(__file__), "saida", "conversas.md")
 EMOJI = re.compile("[\U0001F300-\U0001FAFF☀-➿]")
 
@@ -209,7 +210,12 @@ def test_conversa(nome, mensagens, esperado, instante, conf, relogio, monkeypatc
         linhas.append(f"Paciente: {txt}")
         ctx = {"slug": SLUG, "conf": conf, "tel": CL.EXP_TEL, "sim": True, "reservas": []}
         n0 = len(chamadas)
-        bruto = asyncio.run(CL.conversar_ia(system, msgs, ctx, CL.K(SLUG, "tokens_teste")))
+        try:
+            bruto = asyncio.run(CL.conversar_ia(system, msgs, ctx, CL.K(SLUG, "tokens_teste")))
+        except Exception as e:   # sem credito: para a rodada inteira em vez de falhar conversa por conversa
+            if "credit balance" in str(e):
+                pytest.exit("A conta da API está sem crédito: rodada interrompida.", returncode=2)
+            raise
         limpo, motivo, pedido = CL.interpretar_resposta(bruto)
         linhas += chamadas[n0:]
         linhas.append(f"Assistente: {limpo}")
