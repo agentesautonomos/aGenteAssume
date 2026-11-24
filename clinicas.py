@@ -1102,7 +1102,7 @@ def _json_de(txt: str) -> dict:
 
 def _ia_aux(pedido: str, chave_tokens: str, max_tokens: int = 400) -> dict:
     kw = {"extra_body": {"thinking": {"type": "disabled"}}} if re.match(r"claude-(haiku|sonnet|opus)-5", MODELO_CONFERENTE) else {}
-    resp = claude().messages.create(model=MODELO_CONFERENTE, max_tokens=max_tokens, temperature=0,
+    resp = claude().messages.create(model=MODELO_CONFERENTE, max_tokens=max_tokens,
                                     messages=[{"role": "user", "content": pedido}], **kw)
     try:
         R.hincrby(chave_tokens, "aux_entrada", resp.usage.input_tokens)

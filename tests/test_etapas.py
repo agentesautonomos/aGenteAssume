@@ -71,6 +71,7 @@ class Falso:
 
     def create(self, **kw):
         self.pedidos.append(kw)
+        assert "temperature" not in kw     # os modelos da familia 5 recusam temperature
         if kw["model"] == CL.MODELO_CONFERENTE and "system" not in kw:
             txt = kw["messages"][0]["content"]
             out = json.dumps(est(motivo="limpeza", perguntas=["atende Amil?"])) if txt.startswith("[ETAPAS]") \
