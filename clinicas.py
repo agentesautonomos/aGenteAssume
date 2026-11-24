@@ -32,6 +32,7 @@ import html
 import hmac
 import time
 import asyncio
+import base64
 import hashlib
 import secrets
 from datetime import date, datetime, timedelta, timezone
@@ -41,8 +42,8 @@ import httpx
 import redis
 import agenda as AG
 from anthropic import Anthropic
-from fastapi import APIRouter, Request, Depends, HTTPException, Form
-from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi import APIRouter, Request, Depends, HTTPException, Form, UploadFile, File
+from fastapi.responses import HTMLResponse, RedirectResponse, Response
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 
 router = APIRouter()
@@ -1463,8 +1464,14 @@ h1,h2,h3{font-family:'Bricolage Grotesque',system-ui,sans-serif;letter-spacing:-
 .logo b{font-weight:800}.logo span{font-weight:500}
 /* ---------- estrutura: lateral no computador, barra embaixo no celular ---------- */
 .lateral{position:fixed;inset:0 auto 0 0;width:var(--lateral);background:var(--tinta);color:#fff;display:flex;flex-direction:column;padding:22px 14px;gap:22px;z-index:20}
-.lateral .logo{color:#fff;padding:0 8px}
-.lateral .cl{margin:-8px 8px 0;font-size:13px;color:#AEB9CC;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.lateral .clin{display:flex;align-items:center;gap:12px;padding:10px;border-radius:14px;background:rgba(255,255,255,.06);text-decoration:none;color:#fff}
+.lateral .clin b{font-size:14.5px;line-height:1.25;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+.clogo{width:44px;height:44px;border-radius:12px;flex:none;background:#fff;display:flex;align-items:center;justify-content:center;overflow:hidden;font-family:'Bricolage Grotesque',sans-serif;font-weight:700;font-size:16px;color:var(--tinta)}
+.clogo img{width:100%;height:100%;object-fit:contain}
+.clogo.sem{background:var(--lilas)}
+.logo-prev .clogo{width:72px;height:72px;border-radius:18px;font-size:24px;border:1px solid var(--linha)}
+.lateral .assina{display:flex;align-items:center;gap:8px;padding:0 10px;font-size:12px;color:#8F9BB0;text-decoration:none}
+.lateral .assina b{color:#C9D2E0;font-weight:600}
 .lateral nav{display:flex;flex-direction:column;gap:2px;flex:1}
 .lateral nav a{display:flex;align-items:center;gap:12px;color:#C9D2E0;text-decoration:none;padding:9px 10px;border-radius:10px;font-size:14.5px}
 .lateral nav a:hover{background:rgba(255,255,255,.06);color:#fff}
@@ -1479,8 +1486,10 @@ h1,h2,h3{font-family:'Bricolage Grotesque',system-ui,sans-serif;letter-spacing:-
 @media(max-width:899px){
   .lateral{display:none}
   .topo{display:flex;align-items:center;gap:10px;position:sticky;top:0;z-index:20;background:var(--tinta);color:#fff;padding:12px 16px}
-  .topo .logo{color:#fff;font-size:17px}
-  .topo .cl{margin-left:auto;font-size:13px;color:#AEB9CC;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:45%}
+  .topo .clin{display:flex;align-items:center;gap:10px;color:#fff;text-decoration:none;min-width:0;flex:1}
+  .topo .clin b{font-size:15px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .topo .clogo{width:34px;height:34px;border-radius:9px;font-size:13px}
+  .topo .marca{flex:none;opacity:.9;display:flex}
   .baixo{display:grid;grid-template-columns:repeat(5,1fr);position:fixed;left:0;right:0;bottom:0;z-index:30;height:calc(var(--baixo) + env(safe-area-inset-bottom));padding-bottom:env(safe-area-inset-bottom);background:#fff;border-top:1px solid var(--linha)}
   .baixo>a,.baixo>details>summary{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:3px;font-size:11.5px;color:var(--txt2);text-decoration:none;height:100%;cursor:pointer;list-style:none}
   .baixo>details>summary::-webkit-details-marker{display:none}
@@ -1687,6 +1696,27 @@ def faixa(id_: str, html_txt: str, erro: bool = False) -> str:
             f'<button class="x" type="button" aria-label="Fechar aviso">&times;</button></div>')
 
 
+LOGO_MAX_BYTES = 500 * 1024
+_LOGO_TIPOS = ((b"\x89PNG\r\n\x1a\n", "image/png"), (b"\xff\xd8\xff", "image/jpeg"))
+
+
+def tipo_imagem(dados: bytes) -> str | None:
+    """Só PNG, JPG e WEBP (SVG fica de fora: pode carregar script)."""
+    for assinatura, tipo in _LOGO_TIPOS:
+        if dados.startswith(assinatura):
+            return tipo
+    if dados[:4] == b"RIFF" and dados[8:12] == b"WEBP":
+        return "image/webp"
+    return None
+
+
+def html_logo_clinica(c: dict) -> str:
+    """Logo que a clínica enviou; sem logo, as iniciais do nome."""
+    if c.get("logo_v"):
+        return f'<span class="clogo"><img src="/painel/logo?v={esc(c["logo_v"])}" alt=""></span>'
+    return f'<span class="clogo sem">{esc(iniciais(c.get("nome", "")))}</span>'
+
+
 def pagina(titulo: str, corpo: str, s: dict | None = None, ativa: str = "", extra_head: str = "", classe: str = "") -> str:
     head = (f'<!DOCTYPE html><html lang="pt-br"><head><meta charset="utf-8">'
             f'<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">'
@@ -1695,15 +1725,18 @@ def pagina(titulo: str, corpo: str, s: dict | None = None, ativa: str = "", extr
     if not s:
         return f'{head}<body class="sem-app {classe}"><main>{corpo}</main>{JS_BASE}</body></html>'
     nome_cl = esc(s["clinica"]["nome"])
+    clogo = html_logo_clinica(s["clinica"])
 
     def link(k, t, u, com_icone=True):
         return f'<a href="{u}" class="{"ativo" if k == ativa else ""}">{icone(k) if com_icone else ""}<span>{t}</span></a>'
-    lateral = (f'<aside class="lateral">{logo(30)}<div class="cl">{nome_cl}</div><nav>'
+    lateral = (f'<aside class="lateral"><a class="clin" href="/painel">{clogo}<b>{nome_cl}</b></a><nav>'
                + "".join(link(k, t, u) for k, t, u in MENU)
                + f'<span class="sep"></span><a href="/painel/senha" class="{"ativo" if ativa == "senha" else ""}">'
                  f'<span style="width:20px"></span><span>Trocar senha</span></a>'
-               + f'<a href="/sair">{icone("sair")}<span>Sair</span></a></nav></aside>')
-    topo = f'<header class="topo">{logo(26)}<span class="cl">{nome_cl}</span></header>'
+               + f'<a href="/sair">{icone("sair")}<span>Sair</span></a></nav>'
+               + f'<a class="assina" href="/painel">{simbolo(18)}<span>com <b>a gente assume</b></span></a></aside>')
+    topo = (f'<header class="topo"><a class="clin" href="/painel">{clogo}<b>{nome_cl}</b></a>'
+            f'<span class="marca" title="a gente assume">{simbolo(24)}</span></header>')
     resto = [(k, t, u) for k, t, u in MENU if k not in MENU_BAIXO]
     mais_ativo = ativa in [k for k, _, _ in resto] or ativa == "senha"
     baixo = ('<nav class="baixo">'
@@ -2575,10 +2608,72 @@ def painel_profissionais_remover(pid: str, s: dict = Depends(exigir_login)):
 
 
 # ============================================================
+# LOGO DA CLÍNICA (aparece no menu, no lugar das iniciais)
+# ============================================================
+@router.get("/painel/logo")
+def painel_logo(s: dict = Depends(exigir_login)):
+    v = R.get(K(s["clinica"]["slug"], "logo"))
+    if not v:
+        raise HTTPException(status_code=404)
+    d = json.loads(v)
+    return Response(base64.b64decode(d["b64"]), media_type=d["tipo"],
+                    headers={"Cache-Control": "private, max-age=31536000", "X-Content-Type-Options": "nosniff"})
+
+
+@router.post("/painel/logo")
+async def painel_logo_post(logo: UploadFile = File(None), s: dict = Depends(exigir_login)):
+    def volta(m):
+        return RedirectResponse("/painel/configuracoes?logo=" + quote(m) + "#logo", status_code=303)
+    dados = await logo.read(LOGO_MAX_BYTES + 1) if logo else b""
+    if not dados:
+        return volta("Escolha uma imagem.")
+    if len(dados) > LOGO_MAX_BYTES:
+        return volta("A imagem passou de 500 KB. Envie uma menor.")
+    tipo = tipo_imagem(dados)
+    if not tipo:
+        return volta("Envie o logo em PNG, JPG ou WEBP.")
+    c = obter_clinica(s["clinica"]["slug"])
+    R.set(K(c["slug"], "logo"), json.dumps({"tipo": tipo, "b64": base64.b64encode(dados).decode()}))
+    c["logo_v"] = secrets.token_hex(4)
+    salvar_clinica(c)
+    return volta("Logo atualizado.")
+
+
+@router.post("/painel/logo/remover")
+def painel_logo_remover(s: dict = Depends(exigir_login)):
+    c = obter_clinica(s["clinica"]["slug"])
+    R.delete(K(c["slug"], "logo"))
+    c.pop("logo_v", None)
+    salvar_clinica(c)
+    return RedirectResponse("/painel/configuracoes?logo=" + quote("Logo removido.") + "#logo", status_code=303)
+
+
+def html_card_logo(c: dict, msg: str = "") -> str:
+    tem = bool(c.get("logo_v"))
+    remover = ('<form method="post" action="/painel/logo/remover" class="in">'
+               '<button class="btn sec peq">Tirar o logo</button></form>') if tem else ""
+    return f"""<div class="card" id="logo"><h2>Logo da clínica</h2>
+      {f'<div class="aviso">{esc(msg)}</div>' if msg else ''}
+      <div class="linha" style="align-items:center">
+        <span class="logo-prev">{html_logo_clinica(c)}</span>
+        <div style="flex:1;min-width:220px"><p style="font-size:14.5px">Aparece no menu, ao lado do nome da clínica.
+          {'' if tem else 'Sem logo, a gente mostra as iniciais.'}</p>
+          <p style="font-size:13px;color:var(--txt2)">PNG, JPG ou WEBP, até 500 KB. Quadrado fica melhor.</p></div>
+      </div>
+      <div class="linha" style="margin-top:12px">
+        <form method="post" action="/painel/logo" enctype="multipart/form-data" class="linha" id="form-logo">
+          <label class="btn" style="margin:0;color:#fff">{'Trocar o logo' if tem else 'Enviar logo'}
+            <input type="file" name="logo" accept="image/png,image/jpeg,image/webp" hidden
+              onchange="if(this.files.length)this.form.submit()"></label>
+          <noscript><button class="btn sec">Enviar</button></noscript>
+        </form>{remover}</div></div>"""
+
+
+# ============================================================
 # SUA CLÍNICA (o que o assistente sabe sobre a clínica)
 # ============================================================
 @router.get("/painel/configuracoes", response_class=HTMLResponse)
-def painel_config(salvo: str = "", s: dict = Depends(exigir_login)):
+def painel_config(salvo: str = "", logo: str = "", s: dict = Depends(exigir_login)):
     c = s["clinica"]
     conf = obter_conf(c["slug"])
     profs = [x for x in conf["profissionais"] if x.get("nome")]
@@ -2598,6 +2693,7 @@ def painel_config(salvo: str = "", s: dict = Depends(exigir_login)):
         resumo_profs = '<p style="font-size:14.5px;color:var(--txt2)">Ninguém cadastrado ainda.</p>'
     corpo = f"""{aviso}<div class="cab"><div><h1>Sua clínica</h1>
       <p>Tudo o que estiver aqui o assistente usa para responder. O que não estiver, ele passa para a equipe.</p></div></div>
+    {html_card_logo(c, logo)}
     <form method="post">
     <div class="card"><h2>A clínica</h2>
       <div class="grid2">

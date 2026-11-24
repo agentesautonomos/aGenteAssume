@@ -83,3 +83,45 @@ def test_simular_abre_com_sugestoes(conf):
     CL.salvar_clinica(dict(CLINICA))
     html = CL.painel_experimentar(s=sessao()).body.decode()
     assert "Seja o paciente" in html and 'class="chip"' in html
+
+
+# ---------- Logo da clínica ----------
+from urllib.parse import unquote  # noqa: E402
+
+
+class _Arq:
+    def __init__(self, dados: bytes):
+        self.dados = dados
+
+    async def read(self, n=-1):
+        return self.dados
+
+
+PNG_1PX = bytes.fromhex("89504e470d0a1a0a0000000d4948445200000001000000010806000000"
+                        "1f15c4890000000d49444154789c6360000002000001e221bc330000000049454e44ae426082")
+
+
+def test_logo_enviar_mostrar_e_tirar():
+    CL.salvar_clinica(dict(CLINICA))
+    s = {"clinica": CL.obter_clinica("teste"), "usuario": {"email": "a@b.c"}}
+    assert 'class="clogo sem"' in CL.pagina("x", "", s)          # sem logo: iniciais
+
+    r = asyncio.run(CL.painel_logo_post(_Arq(PNG_1PX), s=s))
+    assert "Logo atualizado" in unquote(r.headers["location"])
+    s["clinica"] = CL.obter_clinica("teste")
+    assert '/painel/logo?v=' in CL.pagina("x", "", s)
+    img = CL.painel_logo(s=s)
+    assert img.body == PNG_1PX and img.media_type == "image/png"
+
+    CL.painel_logo_remover(s=s)
+    assert not CL.obter_clinica("teste").get("logo_v")
+
+
+def test_logo_recusa_svg_e_arquivo_grande():
+    CL.salvar_clinica(dict(CLINICA))
+    s = {"clinica": CL.obter_clinica("teste"), "usuario": {"email": "a@b.c"}}
+    r = asyncio.run(CL.painel_logo_post(_Arq(b'<svg onload="alert(1)"></svg>'), s=s))
+    assert "PNG" in unquote(r.headers["location"])
+    r = asyncio.run(CL.painel_logo_post(_Arq(PNG_1PX + b"0" * CL.LOGO_MAX_BYTES), s=s))
+    assert "500" in r.headers["location"]
+    assert not CL.obter_clinica("teste").get("logo_v")
