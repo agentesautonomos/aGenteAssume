@@ -32,7 +32,7 @@ import time
 import asyncio
 import hashlib
 import secrets
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from urllib.parse import quote
 
 import httpx
@@ -546,6 +546,11 @@ def montar_prompt(c: dict, conf: dict) -> str:
             "consulte ver_horarios_livres sem profissional e, ao perguntar a preferência de profissional, cite só quem tem horário livre nesse dia. "
             "Se o profissional que ele quer não atende nesse dia, diga isso e ofereça os dias em que ele atende "
             "ou outro profissional que atende no dia pedido.",
+            "A agenda já escreve cada dia do jeito certo (ex.: \"amanhã, terça 24/11\", \"segunda 28/12\"): copie essa escrita "
+            "e nunca calcule dia da semana ou \"amanhã\" por conta própria. Não diga \"esta semana\", \"semana que vem\" "
+            "nem \"próxima semana\" ao oferecer horários: diga só o dia e a data.",
+            "Quando a agenda trouxer a linha SUGESTÃO PARA OFERECER, ofereça esses horários (são no máximo 3), "
+            "a não ser que o paciente tenha pedido uma hora específica.",
             "Ofereça duas ou três opções de horário de cada vez, no total (não por dia nem por profissional), com dia da semana, data e hora (ex.: quarta 26/11 às 9h), "
             "de preferência no dia e período que o paciente pediu. Se não houver, ofereça o mais próximo. "
             "Nunca responda só que \"tem horários\" ou \"posso ver outro dia?\": cite sempre as opções concretas "
@@ -744,6 +749,50 @@ def _hora_param(v: str) -> str:
     return f"{int(m.group(1)):02d}:{int(m.group(2) or 0):02d}"
 
 
+DIAS_FALA = ["segunda", "terça", "quarta", "quinta", "sexta", "sábado", "domingo"]
+
+
+def dia_falado(d, hoje=None) -> str:
+    """Como o dia aparece para o paciente, calculado pelo sistema: 'amanhã, terça 24/11', 'quinta 26/11'."""
+    hoje = hoje or agora().date()
+    base = f"{DIAS_FALA[d.weekday()]} {d.strftime('%d/%m')}"
+    if d == hoje:
+        return "hoje, " + base
+    if d == hoje + timedelta(days=1):
+        return "amanhã, " + base
+    return base
+
+
+def hora_falada(h: str) -> str:
+    """'09:00' -> '9h', '14:30' -> '14h30'."""
+    hh, mm = h.split(":")
+    return f"{int(hh)}h" + ("" if mm == "00" else mm)
+
+
+def _espalhar(hs: list, n: int) -> list:
+    """Escolhe n horarios espalhados (inicio, meio, fim) de uma lista ordenada."""
+    if len(hs) <= n:
+        return list(hs)
+    idx = sorted({round(i * (len(hs) - 1) / (n - 1)) for i in range(n)}) if n > 1 else [0]
+    return [hs[i] for i in idx]
+
+
+def sugestao_txt(por_prof: list, maximo: int = 3) -> str:
+    """por_prof: [(prof, {data: [horas]})]. Monta no maximo 'maximo' opcoes no total, ja escritas para o paciente."""
+    com = [(p, d, hs) for p, res in por_prof for d, hs in list(res.items())[:1] if hs]
+    if not com:
+        return ""
+    cota = [maximo // len(com) + (1 if i < maximo % len(com) else 0) for i in range(len(com))][:maximo]
+    partes = []
+    for (p, d, hs), n in zip(com, cota):
+        if n:
+            escolha = [hora_falada(h) for h in _espalhar(hs, n)]
+            horas = escolha[0] if len(escolha) == 1 else ", ".join(escolha[:-1]) + " ou " + escolha[-1]
+            partes.append(f"{dia_falado(d)} às {horas} com {nome_conversa(p['nome'])}")
+    return ("SUGESTÃO PARA OFERECER (no máximo 3 horários no total; escreva o dia exatamente assim): "
+            + "; ".join(partes) + ".")
+
+
 def _motivos(slug: str, conf: dict, prof: dict, datas: list, sim: bool, periodo: str = "") -> list:
     """[(de, ate, motivo)] para os dias sem horario, agrupando dias seguidos com o mesmo motivo."""
     motivos = []
@@ -752,7 +801,7 @@ def _motivos(slug: str, conf: dict, prof: dict, datas: list, sim: bool, periodo:
             m = "sem horário livre nesse período do dia"
         else:
             m = AG.motivo_sem_horario(slug, conf, prof, d, sim)
-        rot = f"{AG.DIAS_CURTOS[d.weekday()]} {d.strftime('%d/%m')}"
+        rot = dia_falado(d)
         if motivos and motivos[-1][2] == m and motivos[-1][3] == d - timedelta(days=1):
             motivos[-1][1], motivos[-1][3] = rot, d
         else:
@@ -771,14 +820,15 @@ def _sem_horario(slug: str, conf: dict, prof: dict, ini, dias: int, sim: bool, p
     fim = ini + timedelta(days=dias - 1)
     txt = (f"Sem horário livre para {prof['nome']} de {ini.strftime('%d/%m')} a {fim.strftime('%d/%m')}. "
            + "; ".join(partes) + f". {prof['nome']} atende: {AG.resumo_semana(prof)}.")
-    if any("não atende às" in m for _, _, m in motivos):
+    if any("não atende à" in m or "não atende ao" in m for _, _, m in motivos):
         txt += f" Não ofereça {prof['nome']} em dia da semana em que ele não atende."
     prox = AG.livres(slug, conf, prof, max(ini + timedelta(days=dias), agora().date()), 14, sim)
     if prox:
         txt += " Próximos horários livres de " + prof["nome"] + ": " + "; ".join(
-            f"{AG.DIAS_CURTOS[d.weekday()]} {d.strftime('%d/%m')} ({d.isoformat()}): " + ", ".join(hs[:8])
+            f"{dia_falado(d)} [{d.isoformat()}]: " + ", ".join(hs[:8])
             for d, hs in list(prox.items())[:3]) + "."
-    return txt + " Explique o motivo certo ao paciente e já ofereça duas ou três dessas opções concretas (ou outro profissional)."
+        txt += "\n" + sugestao_txt([(prof, prox)])
+    return txt + "\nExplique o motivo certo ao paciente em uma frase simples e já ofereça essas opções (ou outro profissional)."
 
 
 def executar_ferramenta(nome: str, ent: dict, ctx: dict) -> str:
@@ -790,9 +840,12 @@ def executar_ferramenta(nome: str, ent: dict, ctx: dict) -> str:
             return "Nenhuma consulta marcada para este paciente."
         return "\n".join(f"- {AG.quando_txt(x)} com {x['prof_nome']} ({x.get('paciente') or 'sem nome'})" for x in itens)
     if nome == "ver_horarios_livres" and not (ent.get("profissional") or "").strip():
+        ctx["_achados"] = []
         partes = [executar_ferramenta(nome, {**ent, "profissional": x["id"]}, ctx) for x in AG.profs_com_agenda(conf)]
         com = [x for x in partes if not x.startswith("Sem horário")]
-        return "\n\n".join(com or partes)
+        sug = sugestao_txt(ctx.pop("_achados", []))
+        tira = lambda t: "\n".join(l for l in t.split("\n") if not l.startswith("SUGESTÃO PARA OFERECER"))
+        return "\n\n".join(tira(x) for x in (com or partes)) + ("\n\n" + sug if com and sug else "")
     prof = AG.achar_prof(conf, ent.get("profissional", ""))
     if not prof or not AG.tem_agenda(prof):
         return "Profissional não encontrado na agenda. Use um destes: " + ", ".join(x["nome"] for x in AG.profs_com_agenda(conf))
@@ -805,23 +858,24 @@ def executar_ferramenta(nome: str, ent: dict, ctx: dict) -> str:
             dias = 7
         faixa = PERIODOS.get(ent.get("periodo") or "", (0, 24 * 60))
         res = AG.livres(slug, conf, prof, ini, dias, sim)
-        linhas = []
+        linhas, achados = [], {}
         for d, hs in res.items():
             hs = [h for h in hs if faixa[0] <= AG.minutos(h) < faixa[1]]
             if not hs:
                 continue
+            achados[d] = hs
             if dias > 3 and len(hs) > 16:
                 mostra = ", ".join(hs[:16]) + f" (e mais {len(hs) - 16} horários até {hs[-1]}; consulte só esse dia para ver todos)"
             else:
                 mostra = ", ".join(hs)
-            linhas.append(f"{AG.DIAS_CURTOS[d.weekday()]} {d.strftime('%d/%m')} ({d.isoformat()}): " + mostra)
+            linhas.append(f"{dia_falado(d)} [{d.isoformat()}]: " + mostra)
         if not linhas and res:
             # nada no periodo pedido, mas o dia tem horario: mostra o dia todo (a IA as vezes erra o periodo)
             linhas = [f"Nenhum horário no período pedido (manhã = antes das 12h, almoço = 11h às 14h, tarde = 12h às 18h, "
                       "fim do dia = a partir das 16h, noite = a partir das 18h). Diga isso ao paciente e ofereça o mais próximo. "
                       "Horários livres nesses dias:"]
-            linhas += [f"{AG.DIAS_CURTOS[d.weekday()]} {d.strftime('%d/%m')} ({d.isoformat()}): " + ", ".join(hs)
-                       for d, hs in res.items()]
+            linhas += [f"{dia_falado(d)} [{d.isoformat()}]: " + ", ".join(hs) for d, hs in res.items()]
+            achados = dict(res)
         if not linhas:
             periodo = ent.get("periodo") if ent.get("periodo") not in (None, "", "qualquer") else ""
             return _sem_horario(slug, conf, prof, ini, dias, sim, periodo)
@@ -829,6 +883,9 @@ def executar_ferramenta(nome: str, ent: dict, ctx: dict) -> str:
         faltam = [d for d in faltam if d not in res and AG.intervalos_do_dia(prof, d.weekday())]
         if faltam:
             linhas.append("Sem horário (dias em que atende): " + _txt_motivos(_motivos(slug, conf, prof, faltam, sim)))
+        if "_achados" in ctx:
+            ctx["_achados"].append((prof, achados))
+        linhas.append(sugestao_txt([(prof, achados)]))
         return f"Horários livres de {prof['nome']} (consulta de {AG.duracao(prof)} min):\n" + "\n".join(linhas)
     if nome == "marcar_consulta":
         d = _data_param(ent.get("data"))
@@ -857,12 +914,83 @@ def _bloco_para_param(b) -> dict:
     return {"type": "text", "text": getattr(b, "text", "")}
 
 
+# ------------------------------------------------------------
+# Revisao automatica da resposta antes de enviar
+# ------------------------------------------------------------
+_RE_DIA_DATA = re.compile(r"\b(segunda|ter[çc]a|quarta|quinta|sexta|s[áa]bado|domingo)(-feira)?(,?\s+(?:dia\s+)?)(\d{1,2})/(\d{1,2})\b", re.I)
+_RE_DATA = re.compile(r"\b(\d{1,2})/(\d{1,2})\b")
+_RE_HORA = re.compile(r"\b([01]?\d|2[0-3])(?:h(\d{2})?|:([0-5]\d))(?![\d/])")
+_RE_RELATIVO = re.compile(r"\b(depois de amanh[ãa]|amanh[ãa]|hoje)\b", re.I)
+_RE_SEMANA = re.compile(r"\b(semana que vem|pr[óo]xima semana|esta semana|essa semana)\b", re.I)
+_RE_LICENCA = re.compile(r"\b(posso (marcar|agendar|verificar|ver|confirmar|consultar)|quer que eu|deseja que eu|gostaria que eu)\b", re.I)
+
+
+def _data_de(dd: int, mm: int, hoje):
+    """DD/MM -> date, no ano que deixa a data mais perto de hoje (dezembro/janeiro)."""
+    try:
+        cands = [date(hoje.year + k, mm, dd) for k in (-1, 0, 1)]
+    except ValueError:
+        return None
+    return min(cands, key=lambda d: abs((d - hoje).days))
+
+
+def revisar_resposta(texto: str, hoje=None) -> tuple:
+    """Confere a resposta antes de mandar ao paciente.
+    Corrige sozinho o que da para corrigir com certeza (dia da semana errado ao lado de uma data) e
+    devolve (texto_corrigido, problemas) com o que a IA precisa reescrever."""
+    hoje = hoje or agora().date()
+    linhas = texto.split("\n")
+    fala = "\n".join(l for l in linhas if not l.strip().startswith("["))   # as linhas [AGENDAMENTO]/[ENCAMINHAR] nao vao ao paciente
+
+    def corrige_dia(m):
+        d = _data_de(int(m.group(4)), int(m.group(5)), hoje)
+        if not d:
+            return m.group(0)
+        certo = DIAS_FALA[d.weekday()]
+        escrito = m.group(1)
+        if escrito.lower().replace("c", "ç").replace("sabado", "sábado") == certo or escrito.lower() == certo:
+            return m.group(0)
+        certo = certo[0].upper() + certo[1:] if escrito[0].isupper() else certo
+        return certo + (m.group(2) or "") + m.group(3) + m.group(4) + "/" + m.group(5)
+    texto = _RE_DIA_DATA.sub(corrige_dia, texto)
+    fala = _RE_DIA_DATA.sub(corrige_dia, fala)
+
+    problemas = []
+    for frase in re.split(r"(?<=[.!?])\s+|\n", fala):
+        datas = [d for d in (_data_de(int(a), int(b), hoje) for a, b in _RE_DATA.findall(frase)) if d]
+        for m in _RE_RELATIVO.finditer(frase):
+            palavra = m.group(1).lower().replace("amanha", "amanhã")
+            alvo = {"hoje": 0, "amanhã": 1, "depois de amanhã": 2}[palavra]
+            perto = [d for d in (_data_de(int(a), int(b), hoje) for a, b in _RE_DATA.findall(frase[m.end():m.end() + 40])) if d]
+            if perto and perto[0] != hoje + timedelta(days=alvo):
+                problemas.append(f"chamou {perto[0].strftime('%d/%m')} de \"{palavra}\", mas {palavra} é "
+                                 f"{dia_falado(hoje + timedelta(days=alvo), hoje).split(', ')[-1]}")
+        for m in _RE_SEMANA.finditer(frase):
+            seg = hoje - timedelta(days=hoje.weekday())
+            ini, fim = (seg + timedelta(days=7), seg + timedelta(days=13)) if "vem" in m.group(1).lower() or "próx" in m.group(1).lower() \
+                else (hoje, seg + timedelta(days=6))
+            fora = [d for d in datas if not ini <= d <= fim]
+            if fora:
+                problemas.append(f"disse \"{m.group(1)}\" para {fora[0].strftime('%d/%m')}, que não é {m.group(1)} "
+                                 f"({ini.strftime('%d/%m')} a {fim.strftime('%d/%m')}); escreva só o dia e a data")
+    horas = {(int(a), int(b or c or 0)) for a, b, c in _RE_HORA.findall(fala)}
+    if len(horas) > 3:
+        problemas.append(f"ofereceu {len(horas)} horários; ofereça no máximo 3 no total")
+    if fala.count("?") > 1:
+        problemas.append("fez mais de uma pergunta; deixe só uma")
+    if "(" in fala or re.search(r"\bsobrenome\b", fala, re.I):
+        problemas.append("copiou dados do cadastro (parênteses ou 'Sobrenome'); escreva como numa conversa")
+    if _RE_LICENCA.search(fala):
+        problemas.append("pediu licença ou confirmação (\"posso...\", \"quer que eu...\"); faça direto: consulte, ofereça ou marque")
+    return texto, problemas
+
+
 async def conversar_ia(system: str, msgs: list, ctx: dict, chave_tokens: str) -> str:
     """Chama a IA com as ferramentas da agenda (se a clinica tiver agenda) e devolve o texto final."""
     tools = ferramentas_agenda(ctx["conf"])
     msgs = list(msgs)
-    textos = []
-    for _ in range(6):
+    textos, revisoes = [], 0
+    for _ in range(8):
         kw = {"tools": tools} if tools else {}
         if _MODELO_NOVO:
             # modelos da familia 5 pensam por padrao; no WhatsApp a resposta e curta, entao desligamos
@@ -877,7 +1005,19 @@ async def conversar_ia(system: str, msgs: list, ctx: dict, chave_tokens: str) ->
         texto = "".join(getattr(b, "text", "") for b in resp.content if getattr(b, "type", "") == "text").strip()
         usos = [b for b in resp.content if getattr(b, "type", "") == "tool_use"]
         if resp.stop_reason != "tool_use" or not usos:
-            return texto or "\n".join(textos)
+            final = texto or "\n".join(textos)
+            final, problemas = revisar_resposta(final)
+            if problemas and revisoes < 2 and final:
+                revisoes += 1
+                print(f"CLINICA {ctx['slug']} revisao {revisoes}: {problemas}")
+                ctx.setdefault("revisoes", []).append(problemas)
+                msgs.append({"role": "assistant", "content": resp.content and [_bloco_para_param(b) for b in resp.content] or final})
+                msgs.append({"role": "user", "content": "[revisão interna, o paciente não vê isto] Sua última mensagem não pode ser "
+                             "enviada assim: " + "; ".join(problemas) + ". Reescreva a mensagem inteira para o paciente, corrigida, "
+                             "mantendo o que estava certo (e as linhas [AGENDAMENTO]/[ENCAMINHAR], se houver)."})
+                textos = []
+                continue
+            return final
         if texto:
             textos.append(texto)
         msgs.append({"role": "assistant", "content": [_bloco_para_param(b) for b in resp.content]})
