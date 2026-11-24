@@ -515,6 +515,9 @@ def montar_prompt(c: dict, conf: dict) -> str:
         "atendem coisas diferentes (se ele já disse com quem quer marcar, não pergunte o motivo: vá para o dia e o período); "
         "2) o profissional: sugira quem atende aquilo; se mais de um atende, pergunte se tem preferência por algum; "
         "3) o dia e o período que prefere; depois ofereça as opções de horário; só então 4) o nome; 5) se é particular ou convênio (qual).",
+        "Sugira só profissionais cujas especialidades cobrem o que o paciente precisa (dor, limpeza, avaliação = clínico geral; "
+        "aparelho = ortodontia; implante = implante). Não diga que outro profissional \"também pode ver\" se a especialidade dele não cobre.",
+        "Cumprimente pelo horário de agora (bom dia até 12h, boa tarde até 18h, boa noite depois), mesmo que o paciente use outro.",
         "Se o paciente contar um problema (dor, incômodo), acolha em poucas palavras, sem exagero, e siga. "
         "Se o caso for de urgência ou dor forte, siga a regra de encaminhar.",
         "Quando perguntar a preferência de profissional, cite só quem atende o caso dele, pelo nome de conversa "
@@ -952,7 +955,47 @@ def _data_de(dd: int, mm: int, hoje):
     return min(cands, key=lambda d: abs((d - hoje).days))
 
 
-def revisar_resposta(texto: str, hoje=None) -> tuple:
+_RE_SAUDACAO = re.compile(r"\b(bom dia|boa tarde|boa noite)\b", re.I)
+_DIA_IDX = {"segunda": 0, "terça": 1, "terca": 1, "quarta": 2, "quinta": 3, "sexta": 4, "sábado": 5, "sabado": 5, "domingo": 6}
+_RE_DIA = re.compile(r"\b(segunda|ter[çc]a|quarta|quinta|sexta|s[áa]bado|domingo)s?(?:-feiras?)?\b", re.I)
+_RE_FAIXA_DIAS = re.compile(r"\bde (segunda|ter[çc]a|quarta|quinta|sexta|s[áa]bado|domingo)(?:-feira)? a "
+                            r"(segunda|ter[çc]a|quarta|quinta|sexta|s[áa]bado|domingo)(?:-feira)?\b", re.I)
+
+
+def saudacao_certa(hora: int) -> str:
+    return "bom dia" if hora < 12 else ("boa tarde" if hora < 18 else "boa noite")
+
+
+def _dias_ditos(trecho: str) -> set:
+    dias = set()
+    for a, b in _RE_FAIXA_DIAS.findall(trecho):
+        i, f = _DIA_IDX[a.lower()], _DIA_IDX[b.lower()]
+        dias |= set(range(i, f + 1)) if i <= f else set()
+    sem_faixa = _RE_FAIXA_DIAS.sub(" ", trecho)
+    dias |= {_DIA_IDX[m.lower()] for m in _RE_DIA.findall(sem_faixa)}
+    return dias
+
+
+def _confere_dias_de_atendimento(fala: str, conf: dict) -> list:
+    """'o Dr. Fabio atende de segunda a quinta' quando ele atende seg, ter e qui -> problema."""
+    profs = [(nome_conversa(x["nome"]), x) for x in AG.profs_com_agenda(conf)]
+    problemas, ultimo = [], None
+    for trecho in re.split(r"(?<!Dr)(?<!Dra)[.!?](?=\s|$)|[;\n]|,\s+(?=(?:e |mas )?(?:ele|ela|o dr|a dra))", fala):
+        citados = [(n, p) for n, p in profs if n and n.lower() in trecho.lower()]
+        if citados:
+            ultimo = citados[-1]
+        if not re.search(r"\batende\b", trecho, re.I) or re.search(r"\bn[ãa]o atende\b", trecho, re.I) or not ultimo:
+            continue
+        nome, p = ultimo
+        dias = _dias_ditos(trecho)
+        fora = sorted(d for d in dias if not AG.intervalos_do_dia(p, d))
+        if fora:
+            problemas.append(f"disse que {nome} atende {DIAS_FALA[fora[0]]}, mas {nome} atende só: {AG.resumo_semana(p)}; "
+                             "escreva os dias exatamente")
+    return problemas
+
+
+def revisar_resposta(texto: str, hoje=None, conf=None, hora=None) -> tuple:
     """Confere a resposta antes de mandar ao paciente.
     Corrige sozinho o que da para corrigir com certeza (dia da semana errado ao lado de uma data) e
     devolve (texto_corrigido, problemas) com o que a IA precisa reescrever."""
@@ -971,11 +1014,13 @@ def revisar_resposta(texto: str, hoje=None) -> tuple:
         certo = certo[0].upper() + certo[1:] if escrito[0].isupper() else certo
         return certo + (m.group(2) or "") + m.group(3) + m.group(4) + "/" + m.group(5)
     texto = _RE_DIA_DATA.sub(corrige_dia, texto)
+    certa = saudacao_certa(agora().hour if hora is None else hora)   # cumprimenta pelo relogio, nao pelo paciente
+    texto = _RE_SAUDACAO.sub(lambda m: certa[0].upper() + certa[1:] if m.group(1)[0].isupper() else certa, texto)
     texto = _RE_DIA_REPETIDO.sub(lambda m: m.group(1) + (m.group(2) or ""), texto)   # "quarta, quarta 25/11" -> "quarta 25/11"
-    fala = _RE_DIA_REPETIDO.sub(lambda m: m.group(1) + (m.group(2) or ""), _RE_DIA_DATA.sub(corrige_dia, fala))
+    fala = "\n".join(l for l in texto.split("\n") if not l.strip().startswith("["))
 
     problemas = []
-    for frase in re.split(r"(?<=[.!?])\s+|\n", fala):
+    for frase in re.split(r"(?<!Dr)(?<!Dra)(?<=[.!?])\s+|\n", fala):
         datas = [d for d in (_data_de(int(a), int(b), hoje) for a, b in _RE_DATA.findall(frase)) if d]
         for m in _RE_RELATIVO.finditer(frase):
             palavra = m.group(1).lower().replace("amanha", "amanhã")
@@ -992,6 +1037,8 @@ def revisar_resposta(texto: str, hoje=None) -> tuple:
             if fora:
                 problemas.append(f"disse \"{m.group(1)}\" para {fora[0].strftime('%d/%m')}, que não é {m.group(1)} "
                                  f"({ini.strftime('%d/%m')} a {fim.strftime('%d/%m')}); escreva só o dia e a data")
+    if conf:
+        problemas += _confere_dias_de_atendimento(fala, conf)
     horas = {(int(a), int(b or c or 0)) for a, b, c in _RE_HORA.findall(fala)}
     if len(horas) > 3:
         problemas.append(f"ofereceu {len(horas)} horários; ofereça no máximo 3 no total")
@@ -1029,7 +1076,7 @@ async def conversar_ia(system: str, msgs: list, ctx: dict, chave_tokens: str) ->
                 # a reescrita falou do sistema em vez de falar com o paciente: fica com o rascunho anterior
                 print(f"CLINICA {ctx['slug']} reescrita descartada: {final[:120]!r}")
                 return rascunho
-            final, problemas = revisar_resposta(final)
+            final, problemas = revisar_resposta(final, conf=ctx.get("conf"))
             rascunho = final
             if problemas and revisoes < 2 and final:
                 revisoes += 1

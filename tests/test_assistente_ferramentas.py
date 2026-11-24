@@ -306,3 +306,20 @@ def test_texto_interno_da_revisao_e_reconhecido():
 def test_hoje_explica_que_horario_anterior_ja_passou(ferramenta):
     r = ferramenta("ver_horarios_livres", profissional="Dra. Ana Souza", dias=1)
     assert "Agora são 10:00" in r and "já passaram" in r
+
+
+def test_revisao_cumprimenta_pelo_relogio():
+    txt, _ = CL.revisar_resposta("Boa noite! Para aparelho quem atende é o Dr. Fabio.", date(2026, 11, 23), hora=10)
+    assert txt.startswith("Bom dia!")
+
+
+def test_revisao_pega_dias_de_atendimento_errados(conf):
+    hoje = date(2026, 11, 23)
+    _, probs = CL.revisar_resposta("Poxa, o Dr. Fabio não atende às quartas; ele atende de segunda a quinta, à tarde. "
+                                   "Qual prefere?", hoje, conf=conf, hora=10)
+    assert any("quarta" in p and "Dr. Fabio" in p for p in probs)
+    _, probs = CL.revisar_resposta("O Dr. Fabio não atende às quartas; ele atende segunda, terça e quinta à tarde. "
+                                   "Qual prefere?", hoje, conf=conf, hora=10)
+    assert probs == []
+    _, probs = CL.revisar_resposta("A Dra. Ana atende de segunda a sexta. Qual dia fica melhor?", hoje, conf=conf, hora=10)
+    assert probs == []
