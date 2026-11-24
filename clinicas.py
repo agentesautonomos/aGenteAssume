@@ -435,6 +435,11 @@ def salvar_conf(slug: str, conf: dict):
     R.set(K(slug, "conf"), json.dumps(conf, ensure_ascii=False))
 
 
+# periodos do dia que o paciente pode pedir (minutos desde 00:00, inicio inclusive, fim exclusivo)
+PERIODOS = {"manha": (0, 12 * 60), "almoco": (11 * 60, 14 * 60), "tarde": (12 * 60, 18 * 60),
+            "fim_do_dia": (16 * 60, 24 * 60), "noite": (18 * 60, 24 * 60)}
+
+
 def montar_prompt(c: dict, conf: dict) -> str:
     nome_cl = c.get("nome", "a clínica")
     nome_ass = conf.get("nome_assistente") or f"assistente da {nome_cl}"
@@ -468,6 +473,23 @@ def montar_prompt(c: dict, conf: dict) -> str:
                     p.append(f"  {rot}: {x[ch]}")
     if conf.get("extra"):
         p += ["", "=== OUTRAS INFORMAÇÕES E REGRAS DA CLÍNICA ===", conf["extra"]]
+    p += [
+        "",
+        "=== COMO CONDUZIR A CONVERSA ===",
+        "Faça uma pergunta por vez: cada mensagem sua tem no máximo uma pergunta (um ponto de interrogação). "
+        "Espere a resposta antes de perguntar a próxima coisa.",
+        "Para marcar consulta, descubra nesta ordem, pulando o que o paciente já disse: "
+        "1) se tem preferência por algum profissional; 2) o dia e o período que prefere; "
+        "depois ofereça as opções de horário; só então 3) o nome; 4) se é particular ou convênio (qual).",
+        "Quando perguntar a preferência de profissional, diga quem pode atender (ex.: \"Aqui atendem a Dra. Ana e o Dr. Fabio. "
+        "Tem preferência por algum?\"). Se o paciente disser que tanto faz, siga com qualquer um que tenha horário.",
+        "Quando perguntar a preferência de horário, pergunte de forma aberta (ex.: \"Qual dia e período fica melhor para você?\").",
+        "Entenda o período que o paciente diz: cedo ou de manhã = antes das 12h (cedo = primeiros horários da manhã); "
+        "hora do almoço = 11h às 14h; à tarde ou depois do almoço = 12h às 18h; "
+        "final do dia, fim da tarde ou depois do trabalho = a partir das 16h (os últimos horários do dia); "
+        "à noite = a partir das 18h. \"Qualquer horário\" ou \"tanto faz\" = sem preferência. "
+        "Ofereça só horários dentro do período que ele disse; se não houver, diga isso e ofereça o mais próximo.",
+    ]
     if com_agenda:
         nomes = ", ".join(x["nome"] for x in com_agenda)
         p += [
@@ -476,7 +498,7 @@ def montar_prompt(c: dict, conf: dict) -> str:
             f"Você marca consultas de verdade na agenda para: {nomes}.",
             "Nunca invente nem prometa um horário: antes de oferecer, consulte com a ferramenta ver_horarios_livres.",
             "Nunca ofereça um profissional para um dia em que ele não atende. Se o paciente pede um dia sem dizer o profissional, "
-            "consulte ver_horarios_livres sem profissional e ofereça só quem tem horário livre nesse dia. "
+            "consulte ver_horarios_livres sem profissional e, ao perguntar a preferência de profissional, cite só quem tem horário livre nesse dia. "
             "Se o profissional que ele quer não atende nesse dia, diga isso e ofereça os dias em que ele atende "
             "ou outro profissional que atende no dia pedido.",
             "Ofereça duas ou três opções de horário de cada vez, com dia da semana, data e hora (ex.: quarta 26/11 às 9h), "
@@ -625,8 +647,10 @@ def ferramentas_agenda(conf: dict) -> list:
                               "Deixe vazio para ver todos os profissionais que atendem no período."},
              "data_inicial": {"type": "string", "description": "Primeiro dia a olhar, AAAA-MM-DD. Se não souber, deixe vazio (hoje)."},
              "dias": {"type": "integer", "description": "Quantos dias olhar a partir da data inicial (1 a 14). Padrão 7."},
-             "periodo": {"type": "string", "enum": ["manha", "tarde", "noite", "qualquer"],
-                         "description": "Período que o paciente prefere: manha = antes das 12h, tarde = de 12h às 18h, "
+             "periodo": {"type": "string", "enum": [*PERIODOS, "qualquer"],
+                         "description": "Período que o paciente prefere: manha = antes das 12h (cedo também), "
+                                        "almoco = 11h às 14h, tarde = 12h às 18h (depois do almoço também), "
+                                        "fim_do_dia = a partir das 16h (final do dia, fim da tarde, depois do trabalho), "
                                         "noite = a partir das 18h. Se o paciente pediu uma hora exata, use qualquer. Padrão qualquer."}},
              "required": []}},
         {"name": "marcar_consulta",
@@ -733,7 +757,7 @@ def executar_ferramenta(nome: str, ent: dict, ctx: dict) -> str:
             dias = max(1, min(14, int(ent.get("dias") or 7)))
         except (TypeError, ValueError):
             dias = 7
-        faixa = {"manha": (0, 12 * 60), "tarde": (12 * 60, 18 * 60), "noite": (18 * 60, 24 * 60)}.get(ent.get("periodo") or "", (0, 24 * 60))
+        faixa = PERIODOS.get(ent.get("periodo") or "", (0, 24 * 60))
         res = AG.livres(slug, conf, prof, ini, dias, sim)
         linhas = []
         for d, hs in res.items():
@@ -747,7 +771,8 @@ def executar_ferramenta(nome: str, ent: dict, ctx: dict) -> str:
             linhas.append(f"{AG.DIAS_CURTOS[d.weekday()]} {d.strftime('%d/%m')} ({d.isoformat()}): " + mostra)
         if not linhas and res:
             # nada no periodo pedido, mas o dia tem horario: mostra o dia todo (a IA as vezes erra o periodo)
-            linhas = [f"Nenhum horário no período pedido (manhã = antes das 12h, tarde = 12h às 18h, noite = a partir das 18h). "
+            linhas = [f"Nenhum horário no período pedido (manhã = antes das 12h, almoço = 11h às 14h, tarde = 12h às 18h, "
+                      "fim do dia = a partir das 16h, noite = a partir das 18h). Diga isso ao paciente e ofereça o mais próximo. "
                       "Horários livres nesses dias:"]
             linhas += [f"{AG.DIAS_CURTOS[d.weekday()]} {d.strftime('%d/%m')} ({d.isoformat()}): " + ", ".join(hs)
                        for d, hs in res.items()]

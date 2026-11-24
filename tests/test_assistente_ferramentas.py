@@ -46,6 +46,25 @@ def test_periodo_tarde(ferramenta):
     assert "14:00" in r and "09:00" not in r
 
 
+def test_periodo_fim_do_dia(ferramenta):
+    r = ferramenta("ver_horarios_livres", profissional="Dra. Ana Souza", data_inicial="2026-11-24", dias=1, periodo="fim_do_dia")
+    assert "16:00" in r and "17:30" in r
+    assert "15:30" not in r and "09:00" not in r
+
+
+def test_periodo_almoco(ferramenta):
+    r = ferramenta("ver_horarios_livres", profissional="Dra. Ana Souza", data_inicial="2026-11-24", dias=1, periodo="almoco")
+    assert "11:00" in r and "11:30" in r and "14:00" not in r and "10:30" not in r
+
+
+def test_prompt_pede_uma_pergunta_por_vez_e_preferencias(conf):
+    from conftest import CLINICA
+    txt = CL.montar_prompt(CLINICA, conf)
+    assert "uma pergunta por vez" in txt
+    assert "preferência por algum profissional" in txt
+    assert "final do dia" in txt
+
+
 def test_periodo_errado_nao_esconde_horario_do_dia(ferramenta):
     # a IA pediu "noite" para 17h: a ferramenta mostra o dia todo em vez de dizer que nao tem
     r = ferramenta("ver_horarios_livres", profissional="Dra. Ana Souza", data_inicial="2026-11-26", dias=1, periodo="noite")
