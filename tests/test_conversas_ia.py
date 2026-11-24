@@ -125,22 +125,26 @@ def _juiz(fatos: str, conversa: str, esperado: str) -> dict:
         "Reprove se despejar dados do cadastro (listas de especialidades ou convênios, parênteses), se escrever o nome do "
         "profissional como está num cadastro mal preenchido (minúscula, 'Sobrenome', nome completo formal) em vez de "
         "'Dr. Fabio'/'Dra. Ana', ou se soar mecânico.\n\n"
-        "O assistente disse algo falso em relação aos fatos (dia, data, horário, profissional, convênio, preço), "
-        "ofereceu horário que a agenda não mostrou como livre, quebrou uma das regras de conversa, não soou humano, ou deixou de fazer o esperado? "
-        'Responda só com JSON: {"ok": true ou false, "problemas": ["..."]}'
+        "Separe o que achar em três listas:\n"
+        "- fato: disse algo falso (dia, data, dia da semana, 'amanhã'/'semana que vem' errado, horário, profissional, "
+        "convênio, preço), ofereceu horário que a agenda não mostrou como livre, marcou errado, ou deixou de fazer o essencial do esperado;\n"
+        "- regra: quebrou uma regra de conversa (mais de uma pergunta, pediu nome antes de oferecer horário, pediu licença "
+        "ou confirmação para marcar, despejou cadastro, horário fora do período pedido, mais de 3 horários);\n"
+        "- estilo: frase um pouco longa, tom pouco caloroso, escolha de palavras que poderia ser melhor (não reprova).\n"
+        'Responda só com JSON: {"fato": ["..."], "regra": ["..."], "estilo": ["..."]}'
     )
     r = CL.claude().messages.create(model=MODELO_JUIZ, max_tokens=4000, messages=[{"role": "user", "content": pedido}])
     txt = "".join(getattr(b, "text", "") for b in r.content if getattr(b, "type", "") == "text")
     m = re.search(r"\{.*\}", txt, re.S)
     try:
-        return json.loads(m.group(0)) if m else {"ok": False, "problemas": [f"juiz sem JSON: {txt[:200]}"]}
+        return json.loads(m.group(0)) if m else {"regra": [f"juiz sem JSON: {txt[:200]}"]}
     except json.JSONDecodeError:
-        return {"ok": False, "problemas": [f"juiz com JSON inválido: {txt[:200]}"]}
+        return {"regra": [f"juiz com JSON inválido: {txt[:200]}"]}
 
 
 @pytest.fixture(scope="module", autouse=True)
 def _relatorio_novo():
-    for f in (SAIDA, CUSTOS):
+    for f in (SAIDA, CUSTOS, RESUMO):
         if os.path.exists(f):
             os.remove(f)
     yield
@@ -150,12 +154,18 @@ def _relatorio_novo():
         print(f"\nCUSTO DO ASSISTENTE ({CL.MODELO}): US$ {total:.4f} em {len(linhas)} conversas "
               f"(média US$ {total / max(1, len(linhas)):.5f} por conversa; "
               f"{sum(int(l[2]) for l in linhas)} tokens de entrada, {sum(int(l[3]) for l in linhas)} de saída)")
+    if os.path.exists(RESUMO):
+        rs = [l.split("\t") for l in open(RESUMO, encoding="utf-8").read().splitlines()]
+        print(f"RESUMO: {len(rs)} conversas; com erro de FATO: {sum(int(r[1]) > 0 for r in rs)}; "
+              f"com erro de REGRA: {sum(int(r[2]) > 0 for r in rs)}; com nota de estilo: {sum(int(r[3]) > 0 for r in rs)}; "
+              f"revisões automáticas: {sum(int(r[4]) for r in rs)}")
 
 
 # US$ por milhao de tokens (entrada, saida) do modelo do assistente
 PRECOS = {"claude-haiku-4-5-20251001": (1.0, 5.0), "claude-haiku-4-5": (1.0, 5.0), "claude-haiku-5-5": (0.10, 0.50),
           "claude-sonnet-5-5": (2.0, 10.0)}
 CUSTOS = os.path.join(os.path.dirname(__file__), "saida", "custos.tsv")
+RESUMO = os.path.join(os.path.dirname(__file__), "saida", "resumo.tsv")
 
 
 def _registrar_custo(nome, ent, sai, custo):
@@ -170,13 +180,18 @@ def _registrar(nome: str, texto: str):
         f.write(f"\n## {nome}\n\n{texto}\n")
 
 
-@pytest.mark.parametrize("nome,mensagens,esperado,instante", CENARIOS, ids=[c[0] for c in CENARIOS])
+REPETIR = max(1, int(os.environ.get("REPETIR") or 1))
+_RODADAS = [(f"{c[0]}#{i + 1}" if REPETIR > 1 else c[0], *c[1:]) for i in range(REPETIR) for c in CENARIOS]
+
+
+@pytest.mark.parametrize("nome,mensagens,esperado,instante", _RODADAS, ids=[c[0] for c in _RODADAS])
 def test_conversa(nome, mensagens, esperado, instante, conf, relogio, monkeypatch):
     if instante:
         relogio.ajustar(instante)
-    if nome in AJUSTES:
+    base = nome.split("#")[0]
+    if base in AJUSTES:
         for x in conf["profissionais"]:
-            x["nome"] = AJUSTES[nome].get(x["id"], x["nome"])
+            x["nome"] = AJUSTES[base].get(x["id"], x["nome"])
         CL.salvar_conf(SLUG, conf)
     chamadas = []
     original = CL.executar_ferramenta
@@ -188,7 +203,7 @@ def test_conversa(nome, mensagens, esperado, instante, conf, relogio, monkeypatc
     monkeypatch.setattr(CL, "executar_ferramenta", espiar)
 
     system = CL.montar_prompt(CLINICA, conf) + CL.contexto_tempo(conf)
-    msgs, linhas, reservas = [], [], []
+    msgs, linhas, reservas, revisoes_por_msg = [], [], [], []
     for txt in mensagens:
         msgs.append({"role": "user", "content": txt})
         linhas.append(f"Paciente: {txt}")
@@ -203,6 +218,9 @@ def test_conversa(nome, mensagens, esperado, instante, conf, relogio, monkeypatc
         if pedido:
             linhas.append(f"[anotou pedido para a recepção: {pedido}]")
         reservas += ctx["reservas"]
+        revisoes_por_msg.append(ctx.get("revisoes", []))
+        for r in ctx.get("revisoes", []):
+            linhas.insert(len(linhas) - 1, f"[revisão automática pediu para reescrever: {'; '.join(r)}]")
         msgs.append({"role": "assistant", "content": bruto})
     conversa = "\n".join(linhas)
 
@@ -226,10 +244,19 @@ def test_conversa(nome, mensagens, esperado, instante, conf, relogio, monkeypatc
     custo = (ent * preco[0] + sai * preco[1]) / 1e6
     _registrar_custo(nome, ent, sai, custo)
     veredito = _juiz(fatos, conversa, esperado)
-    if not veredito.get("ok"):
-        problemas += [f"juiz: {x}" for x in veredito.get("problemas", [])]
+    erros_fato = [f"FATO: {x}" for x in veredito.get("fato", [])] + [f"FATO: {x}" for x in problemas if x.startswith("consulta inválida")]
+    erros_regra = [f"REGRA: {x}" for x in veredito.get("regra", [])] + [f"REGRA: {x}" for x in problemas if not x.startswith("consulta inválida")]
+    estilo = [f"estilo: {x}" for x in veredito.get("estilo", [])]
+    revisoes = sum(len(x) for x in revisoes_por_msg)
+    os.makedirs(os.path.dirname(RESUMO), exist_ok=True)
+    with open(RESUMO, "a", encoding="utf-8") as f:
+        f.write(f"{nome}\t{len(erros_fato)}\t{len(erros_regra)}\t{len(estilo)}\t{revisoes}\n")
 
-    _registrar(nome, f"**Modelo:** {CL.MODELO} · {ent} tokens de entrada, {sai} de saída · US$ {custo:.4f}\n\n"
+    _registrar(nome, f"**Modelo:** {CL.MODELO} · {ent} tokens de entrada, {sai} de saída · US$ {custo:.4f} · "
+               f"revisões automáticas: {revisoes}\n\n"
                f"**Esperado:** {esperado}\n\n```\n{conversa}\n```\n\n"
-               + ("**OK**" if not problemas else "**Problemas:**\n" + "\n".join(f"- {x}" for x in problemas)))
-    assert not problemas, "\n".join(problemas) + "\n\n" + conversa
+               + ("**OK**" if not (erros_fato or erros_regra) else "**Problemas:**")
+               + "".join(f"\n- {x}" for x in erros_fato + erros_regra + estilo))
+    if estilo:
+        print(f"\n[{nome}] " + " | ".join(estilo))
+    assert not (erros_fato or erros_regra), "\n".join(erros_fato + erros_regra) + "\n\n" + conversa
