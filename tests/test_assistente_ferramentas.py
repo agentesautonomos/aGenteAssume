@@ -323,3 +323,7 @@ def test_revisao_pega_dias_de_atendimento_errados(conf):
     assert probs == []
     _, probs = CL.revisar_resposta("A Dra. Ana atende de segunda a sexta. Qual dia fica melhor?", hoje, conf=conf, hora=10)
     assert probs == []
+
+
+def test_reescrita_que_pede_desculpa_pela_confusao_e_descartada():
+    assert CL._RE_META.search("Desculpe a confusão. O Dr. Fabio não atende de manhã.")
