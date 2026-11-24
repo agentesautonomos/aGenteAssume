@@ -18,7 +18,9 @@ Rotas:
   /painel/conversa/{tel}            uma conversa, com assumir / devolver
   /painel/agenda                    agenda propria (dia/semana): o assistente marca; a equipe marca, move, cancela, bloqueia
   /painel/agendamentos              pedidos que o assistente anotou (profissionais sem horarios na agenda)
-  /painel/configuracoes             profissionais, horarios, convenios -> prompt
+  /painel/profissionais             profissionais e horarios (cards; adicionar/editar num painel lateral)
+  /painel/configuracoes             "Sua clinica": endereco, convenios, regras -> prompt
+  /painel/experimentar              "Simular": a clinica conversa com o assistente fazendo o papel de paciente
   /painel/senha                     trocar a senha
   /admin/clinicas                   (admin da a gente assume) cadastrar e editar clinicas
   /webhook/clinica/{slug}/{chave}   webhook da Z-API de cada clinica
@@ -1448,65 +1450,106 @@ async def webhook_clinica(slug: str, chave: str, request: Request):
 # HTML
 # ============================================================
 CSS = """
-:root{--tinta:#10203A;--lilas:#C7B8FF;--lilas2:#EDE8FF;--papel:#F4F6F9;--txt2:#4A5568;--linha:#D7DDE6;--branco:#fff;--alerta:#B42318;--alerta-bg:#FDECEA;--ok:#1F4E8C;--ok-bg:#E6EEF8}
+:root{--tinta:#10203A;--tinta2:#2B4470;--lilas:#C7B8FF;--lilas2:#EDE8FF;--papel:#F4F6F9;--txt2:#4A5568;--linha:#D7DDE6;--linha2:#E6EAF0;--branco:#fff;--alerta:#B42318;--alerta-bg:#FDECEA;--ok:#1F4E8C;--ok-bg:#E6EEF8;
+  --raio:16px;--sombra:0 1px 2px rgba(16,32,58,.05),0 4px 16px rgba(16,32,58,.05);--lateral:232px;--baixo:64px}
 *{box-sizing:border-box;margin:0;padding:0}
+html{-webkit-text-size-adjust:100%}
 body{font-family:'Instrument Sans',system-ui,sans-serif;background:var(--papel);color:var(--tinta);font-size:15px;line-height:1.5}
-a{color:var(--tinta)}
-h1,h2,h3{font-family:'Bricolage Grotesque',system-ui,sans-serif;letter-spacing:-.01em}
+a{color:var(--tinta)}a:hover{color:var(--tinta2)}
+h1,h2,h3{font-family:'Bricolage Grotesque',system-ui,sans-serif;letter-spacing:-.015em;line-height:1.15}
 .mono{font-family:'JetBrains Mono',ui-monospace,monospace}
-header{background:var(--tinta);color:#fff;padding:14px 20px;display:flex;align-items:center;gap:16px;flex-wrap:wrap}
-header .marca{font-family:'Bricolage Grotesque',sans-serif;font-weight:700;font-size:17px;display:flex;align-items:center;gap:8px}
-header .marca i{width:12px;height:12px;border-radius:50%;background:var(--lilas);display:inline-block}
-header .cl{color:#B9C3D3;font-size:14px}
-header nav{display:flex;gap:4px;margin-left:auto;flex-wrap:wrap}
-header nav a{color:#DDE3EC;text-decoration:none;padding:6px 10px;border-radius:8px;font-size:14px}
-header nav a.ativo,header nav a:hover{background:rgba(255,255,255,.1);color:#fff}
-main{max-width:980px;margin:24px auto;padding:0 16px}
-.card{background:var(--branco);border:1px solid var(--linha);border-radius:14px;padding:18px 20px;margin-bottom:16px}
-.card h2{font-size:17px;margin-bottom:12px}
+.rot{font-family:'JetBrains Mono',ui-monospace,monospace;font-size:11.5px;letter-spacing:.06em;text-transform:uppercase;color:var(--txt2)}
+.logo{display:flex;align-items:center;gap:10px;text-decoration:none;color:inherit;font-family:'Bricolage Grotesque',sans-serif;font-size:19px;letter-spacing:-.03em;line-height:1}
+.logo b{font-weight:800}.logo span{font-weight:500}
+/* ---------- estrutura: lateral no computador, barra embaixo no celular ---------- */
+.lateral{position:fixed;inset:0 auto 0 0;width:var(--lateral);background:var(--tinta);color:#fff;display:flex;flex-direction:column;padding:22px 14px;gap:22px;z-index:20}
+.lateral .logo{color:#fff;padding:0 8px}
+.lateral .cl{margin:-8px 8px 0;font-size:13px;color:#AEB9CC;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.lateral nav{display:flex;flex-direction:column;gap:2px;flex:1}
+.lateral nav a{display:flex;align-items:center;gap:12px;color:#C9D2E0;text-decoration:none;padding:9px 10px;border-radius:10px;font-size:14.5px}
+.lateral nav a:hover{background:rgba(255,255,255,.06);color:#fff}
+.lateral nav a.ativo{background:rgba(199,184,255,.14);color:#fff}
+.lateral nav a.ativo svg{color:var(--lilas)}
+.lateral nav .sep{flex:1}
+.lateral svg,.baixo svg{width:20px;height:20px;flex:none}
+.topo{display:none}
+.baixo{display:none}
+.app main{margin-left:var(--lateral);padding:32px 40px 48px;max-width:calc(var(--lateral) + 1040px)}
+.sem-app main{max-width:980px;margin:24px auto;padding:0 16px}
+@media(max-width:899px){
+  .lateral{display:none}
+  .topo{display:flex;align-items:center;gap:10px;position:sticky;top:0;z-index:20;background:var(--tinta);color:#fff;padding:12px 16px}
+  .topo .logo{color:#fff;font-size:17px}
+  .topo .cl{margin-left:auto;font-size:13px;color:#AEB9CC;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:45%}
+  .baixo{display:grid;grid-template-columns:repeat(5,1fr);position:fixed;left:0;right:0;bottom:0;z-index:30;height:calc(var(--baixo) + env(safe-area-inset-bottom));padding-bottom:env(safe-area-inset-bottom);background:#fff;border-top:1px solid var(--linha)}
+  .baixo>a,.baixo>details>summary{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:3px;font-size:11.5px;color:var(--txt2);text-decoration:none;height:100%;cursor:pointer;list-style:none}
+  .baixo>details>summary::-webkit-details-marker{display:none}
+  .baixo .ativo{color:var(--tinta);font-weight:600}
+  .baixo .ativo svg{color:var(--tinta);background:var(--lilas2);border-radius:20px;padding:2px 14px;width:50px;height:26px}
+  .baixo details{position:relative}
+  .baixo details[open]>div{position:fixed;right:10px;bottom:calc(var(--baixo) + 8px + env(safe-area-inset-bottom));background:#fff;border:1px solid var(--linha);border-radius:14px;box-shadow:0 12px 32px rgba(16,32,58,.18);min-width:210px;padding:6px;display:flex;flex-direction:column}
+  .baixo details>div a{padding:11px 12px;border-radius:10px;text-decoration:none;font-size:15px}
+  .baixo details>div a:hover{background:var(--papel)}
+  .app main{margin:0;padding:18px 16px calc(var(--baixo) + 28px + env(safe-area-inset-bottom))}
+}
+/* ---------- cabeçalho da página ---------- */
+.cab{display:flex;align-items:flex-end;justify-content:space-between;gap:16px;flex-wrap:wrap;margin-bottom:20px}
+.cab h1{font-size:30px;font-weight:800}
+.cab p{color:var(--txt2);font-size:14.5px;margin-top:4px;max-width:62ch}
+@media(max-width:899px){.cab h1{font-size:25px}}
+/* ---------- base ---------- */
+.card{background:var(--branco);border:1px solid var(--linha);border-radius:var(--raio);padding:20px 22px;margin-bottom:16px}
+.card h2{font-size:18px;margin-bottom:12px}
+@media(max-width:899px){.card{padding:16px}}
 .linha{display:flex;align-items:center;gap:12px;flex-wrap:wrap}
-.status{display:grid;grid-template-columns:1fr 1fr;gap:16px}
+.status{display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-bottom:16px}
+.status .card{margin-bottom:0}
 @media(max-width:700px){.status{grid-template-columns:1fr}}
 .ponto{width:10px;height:10px;border-radius:50%;display:inline-block;flex:none}
 .p-ok{background:#2E7DDB}.p-mal{background:var(--alerta)}.p-off{background:#A0AEC0}
 .stats{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-bottom:16px}
 @media(max-width:700px){.stats{grid-template-columns:repeat(2,1fr)}}
-.stat{background:var(--branco);border:1px solid var(--linha);border-radius:14px;padding:14px 16px}
+.stat{background:var(--branco);border:1px solid var(--linha);border-radius:var(--raio);padding:14px 16px}
 .stat .n{font-family:'JetBrains Mono',monospace;font-size:28px;font-weight:600}
 .stat .r{font-size:13px;color:var(--txt2)}
 .periodo{display:flex;gap:6px;margin-bottom:12px}
-.periodo a{font-size:13px;padding:4px 10px;border-radius:20px;border:1px solid var(--linha);text-decoration:none;background:#fff}
+.periodo a{font-size:13px;padding:4px 12px;border-radius:20px;border:1px solid var(--linha);text-decoration:none;background:#fff}
 .periodo a.ativo{background:var(--tinta);color:#fff;border-color:var(--tinta)}
-.item{display:flex;gap:12px;align-items:center;padding:12px 0;border-top:1px solid var(--linha)}
+.item{display:flex;gap:12px;align-items:center;padding:12px 0;border-top:1px solid var(--linha);flex-wrap:wrap}
 .item:first-of-type{border-top:none}
 .item .q{flex:1;min-width:0}
 .item .q b{display:block}
 .item .q small{color:var(--txt2);display:block;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .item .t{font-size:12px;color:var(--txt2);white-space:nowrap}
-.tag{display:inline-block;font-size:12px;padding:2px 8px;border-radius:20px;background:var(--papel);color:var(--txt2);border:1px solid var(--linha);white-space:nowrap}
+.tag{display:inline-block;font-size:12px;padding:2px 9px;border-radius:20px;background:var(--papel);color:var(--txt2);border:1px solid var(--linha);white-space:nowrap}
 .tag.ag{background:var(--alerta-bg);color:var(--alerta);border-color:#F5C2BD}
 .tag.hu{background:var(--lilas2);color:var(--tinta);border-color:var(--lilas)}
 .tag.ok{background:var(--ok-bg);color:var(--ok);border-color:#C3D5EC}
-.btn{display:inline-block;font:inherit;font-size:14px;padding:7px 14px;border-radius:10px;border:1px solid var(--tinta);background:var(--tinta);color:#fff;text-decoration:none;cursor:pointer;white-space:nowrap}
+.btn{display:inline-flex;align-items:center;justify-content:center;gap:8px;font:inherit;font-size:14.5px;font-weight:600;padding:9px 16px;border-radius:999px;border:1px solid var(--tinta);background:var(--tinta);color:#fff;text-decoration:none;cursor:pointer;white-space:nowrap}
+.btn:hover{background:var(--tinta2);color:#fff}
 .btn.sec{background:#fff;color:var(--tinta);border-color:var(--linha)}
+.btn.sec:hover{border-color:var(--tinta)}
 .btn.lil{background:var(--lilas);color:var(--tinta);border-color:var(--lilas)}
-.btn.peq{font-size:13px;padding:5px 10px}
+.btn.lil:hover{background:#B9A7FF}
+.btn.peq{font-size:13px;padding:6px 12px}
+.btn.perigo{background:var(--alerta);border-color:var(--alerta)}
+.btn svg{width:18px;height:18px}
 form.in{display:inline}
 .vazio{color:var(--txt2);font-size:14px;padding:8px 0}
-.aviso{padding:10px 14px;border-radius:10px;margin-bottom:16px;font-size:14px;background:var(--ok-bg);color:var(--ok)}
+.aviso{padding:10px 14px;border-radius:12px;margin-bottom:16px;font-size:14px;background:var(--ok-bg);color:var(--ok)}
 .aviso.erro{background:var(--alerta-bg);color:var(--alerta)}
-label{display:block;font-size:13px;color:var(--txt2);margin:10px 0 4px}
-input[type=text],input[type=email],input[type=password],input[type=tel],input[type=number],input[type=date],input[type=time],textarea,select{width:100%;font:inherit;padding:9px 11px;border:1px solid var(--linha);border-radius:10px;background:#fff;color:var(--tinta)}
+label{display:block;font-size:13px;color:var(--txt2);margin:12px 0 5px}
+input[type=text],input[type=email],input[type=password],input[type=tel],input[type=number],input[type=date],input[type=time],textarea,select{width:100%;font:inherit;font-size:16px;padding:10px 12px;border:1px solid var(--linha);border-radius:12px;background:#fff;color:var(--tinta)}
+@media(min-width:900px){input[type=text],input[type=email],input[type=password],input[type=tel],input[type=number],input[type=date],input[type=time],textarea,select{font-size:15px}}
 textarea{min-height:70px;resize:vertical}
-input:focus,textarea:focus{outline:2px solid var(--lilas);border-color:var(--lilas)}
+input:focus,textarea:focus,select:focus{outline:2px solid var(--lilas);outline-offset:0;border-color:var(--lilas)}
 .grid2{display:grid;grid-template-columns:1fr 1fr;gap:0 14px}
 @media(max-width:700px){.grid2{grid-template-columns:1fr}}
 .semana{display:grid;grid-template-columns:repeat(4,1fr);gap:0 10px}
 @media(max-width:700px){.semana{grid-template-columns:repeat(2,1fr)}}
-.prof{border:1px solid var(--linha);border-radius:12px;padding:6px 14px 14px;margin-bottom:12px;background:var(--papel)}
 .chat{display:flex;flex-direction:column;gap:8px}
-.msg{max-width:78%;padding:8px 12px;border-radius:14px;font-size:14px;white-space:pre-wrap;word-wrap:break-word}
-.msg small{display:block;font-size:11px;color:var(--txt2);margin-top:2px}
+.msg{max-width:78%;padding:8px 12px;border-radius:16px;font-size:14.5px;white-space:pre-wrap;word-wrap:break-word}
+.msg small{display:block;font-size:11px;color:var(--txt2);margin-top:2px;text-align:right}
 .msg.paciente{align-self:flex-start;background:#fff;border:1px solid var(--linha);border-bottom-left-radius:4px}
 .msg.assistente{align-self:flex-end;background:var(--lilas2);border-bottom-right-radius:4px}
 .msg.equipe{align-self:flex-end;background:var(--tinta);color:#fff;border-bottom-right-radius:4px}
@@ -1517,27 +1560,158 @@ pre{white-space:pre-wrap;font-size:12px;background:var(--papel);padding:12px;bor
 .login h1{font-size:28px;margin-bottom:4px}
 table{width:100%;border-collapse:collapse;font-size:14px}
 td,th{padding:8px 6px;border-top:1px solid var(--linha);text-align:left;vertical-align:top}
+/* ---------- faixa fina de aviso (fecha no x) ---------- */
+.faixa{display:flex;align-items:center;gap:12px;padding:9px 10px 9px 14px;border-radius:12px;margin-bottom:14px;font-size:14px;background:var(--lilas2);border:1px solid var(--lilas);color:var(--tinta)}
+.faixa.erro{background:var(--alerta-bg);border-color:#F5C2BD;color:var(--alerta)}
+.faixa .tx{flex:1;min-width:0}
+.faixa .tx a{font-weight:600;white-space:nowrap}
+.faixa .x{flex:none;border:0;background:none;color:inherit;opacity:.6;cursor:pointer;width:28px;height:28px;border-radius:8px;font-size:20px;line-height:1}
+.faixa .x:hover{opacity:1;background:rgba(16,32,58,.06)}
+.faixa.fechada{display:none}
+/* ---------- card de item com menu "..." ---------- */
+.lista{display:grid;grid-template-columns:repeat(auto-fill,minmax(320px,1fr));gap:14px}
+@media(max-width:700px){.lista{grid-template-columns:1fr}}
+.icard{position:relative;background:#fff;border:1px solid var(--linha);border-radius:var(--raio);padding:18px 18px 16px;display:flex;flex-direction:column;gap:12px;transition:box-shadow .15s,border-color .15s}
+.icard:hover{box-shadow:var(--sombra);border-color:#C8D0DC}
+.icard .top{display:flex;align-items:flex-start;gap:12px}
+.av{width:44px;height:44px;border-radius:50%;background:var(--tinta);color:#fff;display:flex;align-items:center;justify-content:center;font-family:'Bricolage Grotesque',sans-serif;font-weight:700;font-size:16px;flex:none}
+.icard h3{font-size:17px}
+.icard .sub{font-size:13.5px;color:var(--txt2)}
+.icard .meta{display:flex;flex-wrap:wrap;gap:6px}
+.dias{display:grid;grid-template-columns:repeat(7,1fr);gap:4px}
+.dias span{font-family:'JetBrains Mono',monospace;font-size:11px;text-align:center;padding:5px 0;border-radius:8px;background:var(--papel);color:#A0AEC0}
+.dias span.on{background:var(--tinta);color:#fff}
+.icard .nota{font-size:13px;color:var(--txt2)}
+.mais{position:relative;margin-left:auto;flex:none}
+.mais>summary{list-style:none;width:34px;height:34px;border-radius:10px;display:flex;align-items:center;justify-content:center;color:var(--txt2)}
+.mais>summary::-webkit-details-marker{display:none}
+.mais>summary:hover,.mais[open]>summary{background:var(--papel);color:var(--tinta)}
+.mais>div{position:absolute;right:0;top:38px;z-index:5;background:#fff;border:1px solid var(--linha);border-radius:12px;box-shadow:0 12px 32px rgba(16,32,58,.14);min-width:180px;padding:6px;display:flex;flex-direction:column}
+.mais>div a,.mais>div button{display:block;text-align:left;font:inherit;font-size:14.5px;padding:9px 12px;border-radius:8px;text-decoration:none;color:var(--tinta);background:none;border:0;cursor:pointer;width:100%}
+.mais>div a:hover,.mais>div button:hover{background:var(--papel)}
+.mais>div .perigo{color:var(--alerta)}
+.icard-novo{border:1.5px dashed var(--linha);background:transparent;align-items:center;justify-content:center;text-align:center;color:var(--txt2);text-decoration:none;min-height:150px;font-weight:600}
+.icard-novo:hover{border-color:var(--tinta);color:var(--tinta);box-shadow:none}
+.icard-novo i{font-style:normal;font-size:26px;line-height:1;width:44px;height:44px;border-radius:50%;background:#fff;border:1px solid var(--linha);display:flex;align-items:center;justify-content:center}
+/* ---------- lista vazia ---------- */
+.vazia{background:#fff;border:1.5px dashed var(--linha);border-radius:var(--raio);padding:40px 20px;text-align:center;display:flex;flex-direction:column;align-items:center;gap:10px}
+.vazia h2{font-size:20px}
+.vazia p{color:var(--txt2);font-size:14.5px;max-width:46ch}
+.vazia .btn{margin-top:6px}
+/* ---------- painel lateral (computador) / folha de baixo (celular) ---------- */
+.folha-fundo{position:fixed;inset:0;background:rgba(16,32,58,.42);z-index:40}
+.folha{position:fixed;z-index:41;background:#fff;display:flex;flex-direction:column;top:0;right:0;bottom:0;width:min(520px,100%);box-shadow:-12px 0 40px rgba(16,32,58,.18);animation:entra-lado .18s ease-out}
+.folha .fcab{display:flex;align-items:center;gap:12px;padding:18px 22px;border-bottom:1px solid var(--linha2)}
+.folha .fcab h2{font-size:20px;flex:1}
+.folha .fcorpo{flex:1;overflow-y:auto;padding:6px 22px 22px}
+.folha .fpe{display:flex;gap:10px;justify-content:flex-end;padding:14px 22px calc(14px + env(safe-area-inset-bottom));border-top:1px solid var(--linha2);background:#fff}
+.fechar{width:36px;height:36px;border-radius:10px;display:flex;align-items:center;justify-content:center;text-decoration:none;color:var(--txt2);font-size:22px;line-height:1}
+.fechar:hover{background:var(--papel);color:var(--tinta)}
+.folha .bloco{margin-top:18px}
+.folha .bloco>.rot{display:block;margin-bottom:2px}
+@keyframes entra-lado{from{transform:translateX(40px);opacity:0}to{transform:none;opacity:1}}
+@keyframes entra-baixo{from{transform:translateY(60px);opacity:0}to{transform:none;opacity:1}}
+@media(max-width:899px){
+  .folha{top:auto;left:0;width:100%;max-height:92vh;border-radius:20px 20px 0 0;box-shadow:0 -12px 40px rgba(16,32,58,.18);animation:entra-baixo .2s ease-out}
+  .folha:before{content:"";display:block;width:40px;height:4px;border-radius:4px;background:var(--linha);margin:8px auto 0}
+  .folha .fcab{padding:10px 16px 12px}.folha .fcorpo{padding:4px 16px 18px}.folha .fpe{padding:12px 16px calc(12px + env(safe-area-inset-bottom))}
+  .folha .fpe .btn{flex:1}
+}
+body.travado{overflow:hidden}
 """
 
 FONTES = ('<link rel="preconnect" href="https://fonts.googleapis.com">'
-          '<link href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:wght@600;700'
-          '&family=Instrument+Sans:wght@400;600&family=JetBrains+Mono:wght@500;600&display=swap" rel="stylesheet">')
+          '<link href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,500;12..96,600;12..96,700;12..96,800'
+          '&family=Instrument+Sans:wght@400;500;600&family=JetBrains+Mono:wght@500;600&display=swap" rel="stylesheet">')
 
 
-def pagina(titulo: str, corpo: str, s: dict | None = None, ativa: str = "", extra_head: str = "") -> str:
-    cab = ""
-    if s:
-        itens = [("painel", "Painel", "/painel"), ("experimentar", "Experimentar", "/painel/experimentar"),
-                 ("conversas", "Conversas", "/painel/conversas"),
-                 ("agenda", "Agenda", "/painel/agenda"),
-                 ("config", "Configurações", "/painel/configuracoes"), ("sair", "Sair", "/sair")]
-        nav = "".join(f'<a href="{u}" class="{"ativo" if k == ativa else ""}">{t}</a>' for k, t, u in itens)
-        cab = (f'<header><span class="marca"><i></i>a gente assume</span>'
-               f'<span class="cl">{esc(s["clinica"]["nome"])}</span><nav>{nav}</nav></header>')
-    return (f'<!DOCTYPE html><html lang="pt-br"><head><meta charset="utf-8">'
-            f'<meta name="viewport" content="width=device-width,initial-scale=1">'
-            f'<title>{esc(titulo)} · a gente assume</title>{FONTES}<style>{CSS}</style>{extra_head}</head>'
-            f'<body>{cab}<main>{corpo}</main></body></html>')
+def simbolo(tam: int = 28, escuro: bool = True) -> str:
+    """Os dois balões da marca. escuro=True: versão para fundo escuro (balão branco)."""
+    b, l = ("#FFFFFF", "#10203A") if escuro else ("#10203A", "#FFFFFF")
+    return (f'<svg width="{tam}" height="{round(tam * 58 / 64)}" viewBox="0 0 64 58" aria-hidden="true">'
+            f'<circle cx="24" cy="22" r="18" fill="{b}"/><path d="M12 33L7 44l13-4.5z" fill="{b}"/>'
+            f'<path d="M16.5 15h14M16.5 22h11M16.5 29h7" stroke="{l}" stroke-width="3.2" stroke-linecap="round" fill="none"/>'
+            f'<circle cx="42" cy="34" r="16" fill="#C7B8FF" stroke="{l}" stroke-width="5"/>'
+            f'<path d="M50 47l8 5-2-13z" fill="#C7B8FF" stroke="{l}" stroke-width="5" stroke-linejoin="round"/>'
+            f'<circle cx="42" cy="34" r="16" fill="#C7B8FF"/><path d="M50 47l8 5-2-13z" fill="#C7B8FF"/>'
+            f'<circle cx="35" cy="34" r="2.6" fill="#10203A"/><circle cx="42" cy="34" r="2.6" fill="#10203A"/>'
+            f'<circle cx="49" cy="34" r="2.6" fill="#10203A"/></svg>')
+
+
+def logo(tam: int = 28) -> str:
+    return f'<a class="logo" href="/painel">{simbolo(tam)}<span>a gente <b>assume</b></span></a>'
+
+
+_ICONES = {
+    "painel": '<path d="M4 11.5 12 5l8 6.5V20a1 1 0 0 1-1 1h-4.5v-5.5h-5V21H5a1 1 0 0 1-1-1z"/>',
+    "conversas": '<path d="M20 12a7.5 7.5 0 0 1-11 6.6L4.5 20l1.3-4.2A7.5 7.5 0 1 1 20 12z"/>',
+    "agenda": '<rect x="4" y="5.5" width="16" height="15" rx="2.5"/><path d="M4 10h16M8.5 3.5v4M15.5 3.5v4"/>',
+    "profs": '<circle cx="9" cy="8.5" r="3.2"/><path d="M3.5 19.5c.6-3.2 2.8-5 5.5-5s4.9 1.8 5.5 5"/><circle cx="17" cy="9.5" r="2.4"/><path d="M16.5 14.6c2.2.2 3.6 1.7 4 4.4"/>',
+    "experimentar": '<path d="M5 18.5V7a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2v7a2 2 0 0 1-2 2H8.5z"/><path d="M9 10.5h.01M12 10.5h.01M15 10.5h.01" stroke-width="2.6"/>',
+    "config": '<path d="M5 20V8.5L12 4l7 4.5V20z"/><path d="M12 9.5v5M9.5 12h5M3.5 20h17"/>',
+    "mais": '<circle cx="6" cy="12" r="1.3"/><circle cx="12" cy="12" r="1.3"/><circle cx="18" cy="12" r="1.3"/>',
+    "sair": '<path d="M14 5h4a1 1 0 0 1 1 1v12a1 1 0 0 1-1 1h-4M10 16l-4-4 4-4M6 12h9"/>',
+}
+
+
+def icone(nome: str) -> str:
+    return (f'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" '
+            f'stroke-linejoin="round" aria-hidden="true">{_ICONES[nome]}</svg>')
+
+
+# (chave, rótulo, endereço). "Simular": a clínica conversa com o assistente fazendo o papel do paciente.
+MENU = [("painel", "Início", "/painel"), ("conversas", "Conversas", "/painel/conversas"),
+        ("agenda", "Agenda", "/painel/agenda"), ("experimentar", "Simular", "/painel/experimentar"),
+        ("profs", "Profissionais", "/painel/profissionais"), ("config", "Sua clínica", "/painel/configuracoes")]
+MENU_BAIXO = ("painel", "conversas", "agenda", "experimentar")
+
+JS_BASE = """<script>
+(function(){
+function guardar(k,v){try{sessionStorage.setItem(k,v)}catch(e){}}
+function ler(k){try{return sessionStorage.getItem(k)}catch(e){return null}}
+document.querySelectorAll('.faixa[data-id]').forEach(function(f){
+  if(ler('faixa:'+f.dataset.id))f.classList.add('fechada');
+  var x=f.querySelector('.x');if(x)x.addEventListener('click',function(){f.classList.add('fechada');guardar('faixa:'+f.dataset.id,'1')});});
+document.addEventListener('click',function(e){document.querySelectorAll('details.mais[open],.baixo details[open]').forEach(function(d){if(!d.contains(e.target))d.removeAttribute('open')})});
+var fo=document.querySelector('.folha');
+if(fo){document.body.classList.add('travado');var sai=fo.querySelector('.fechar');
+  document.addEventListener('keydown',function(e){if(e.key==='Escape'&&sai)location.href=sai.href});
+  var bg=document.querySelector('.folha-fundo');if(bg&&sai)bg.addEventListener('click',function(){location.href=sai.href});}
+})();
+</script>"""
+
+
+def faixa(id_: str, html_txt: str, erro: bool = False) -> str:
+    """Aviso fino que a pessoa fecha no x (fica fechado até fechar o navegador)."""
+    return (f'<div class="faixa{" erro" if erro else ""}" data-id="{esc(id_)}" role="status"><div class="tx">{html_txt}</div>'
+            f'<button class="x" type="button" aria-label="Fechar aviso">&times;</button></div>')
+
+
+def pagina(titulo: str, corpo: str, s: dict | None = None, ativa: str = "", extra_head: str = "", classe: str = "") -> str:
+    head = (f'<!DOCTYPE html><html lang="pt-br"><head><meta charset="utf-8">'
+            f'<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">'
+            f'<meta name="theme-color" content="#10203A">'
+            f'<title>{esc(titulo)} · a gente assume</title>{FONTES}<style>{CSS}</style>{extra_head}</head>')
+    if not s:
+        return f'{head}<body class="sem-app {classe}"><main>{corpo}</main>{JS_BASE}</body></html>'
+    nome_cl = esc(s["clinica"]["nome"])
+
+    def link(k, t, u, com_icone=True):
+        return f'<a href="{u}" class="{"ativo" if k == ativa else ""}">{icone(k) if com_icone else ""}<span>{t}</span></a>'
+    lateral = (f'<aside class="lateral">{logo(30)}<div class="cl">{nome_cl}</div><nav>'
+               + "".join(link(k, t, u) for k, t, u in MENU)
+               + f'<span class="sep"></span><a href="/painel/senha" class="{"ativo" if ativa == "senha" else ""}">'
+                 f'<span style="width:20px"></span><span>Trocar senha</span></a>'
+               + f'<a href="/sair">{icone("sair")}<span>Sair</span></a></nav></aside>')
+    topo = f'<header class="topo">{logo(26)}<span class="cl">{nome_cl}</span></header>'
+    resto = [(k, t, u) for k, t, u in MENU if k not in MENU_BAIXO]
+    mais_ativo = ativa in [k for k, _, _ in resto] or ativa == "senha"
+    baixo = ('<nav class="baixo">'
+             + "".join(link(k, t, u) for k, t, u in MENU if k in MENU_BAIXO)
+             + f'<details><summary class="{"ativo" if mais_ativo else ""}">{icone("mais")}<span>Mais</span></summary><div>'
+             + "".join(f'<a href="{u}">{t}</a>' for _, t, u in resto)
+             + '<a href="/painel/senha">Trocar senha</a><a href="/sair">Sair</a></div></details></nav>')
+    return (f'{head}<body class="app {classe}">{lateral}{topo}<main>{corpo}</main>{baixo}{JS_BASE}</body></html>')
 
 
 def html_resp(conteudo: str) -> HTMLResponse:
@@ -1895,7 +2069,7 @@ def html_ag_dia(slug: str, conf: dict, profs: list, d, sim: bool) -> str:
     if fer:
         blocos.append(f'<div class="aviso" style="background:var(--papel);color:var(--txt2)">Feriado: {esc(fer)}. '
                       'O assistente não oferece horário nesse dia; a equipe ainda pode marcar aqui. '
-                      'Se a clínica atende em feriado, marque isso em Configurações.</div>')
+                      'Se a clínica atende em feriado, marque isso em Sua clínica.</div>')
     for x in gerais:
         hr = "dia todo" if x.get("dia_todo") else f"{x['inicio']}–{x['fim']}"
         blocos.append(f'<div class="aviso" style="background:var(--papel);color:var(--txt2)">Todos bloqueados, {hr}'
@@ -1973,10 +2147,10 @@ def painel_agenda(d: str = "", v: str = "dia", prof: str = "", sim: int = 0, msg
     if not todos:
         corpo = f"""{aviso}<div class="card"><h2>Agenda</h2>
           <p style="font-size:15px;margin-bottom:8px">Para o assistente marcar consultas direto aqui, diga os horários de cada profissional.</p>
-          <p style="color:var(--txt2);font-size:14px;margin-bottom:12px">Em <b>Configurações</b>, em cada profissional, preencha os dias e horários
+          <p style="color:var(--txt2);font-size:14px;margin-bottom:12px">Em <b>Profissionais</b>, abra cada um e preencha os dias e horários
           (ex.: <span class="mono">8h-12h, 14h-18h</span>) e a duração da consulta. A partir daí o assistente oferece só horários livres
           e a recepção vê tudo aqui: move, cancela e bloqueia.</p>
-          <a class="btn lil" href="/painel/configuracoes">Preencher os horários</a></div>{html_ag_pedidos_link(slug)}"""
+          <a class="btn lil" href="/painel/profissionais">Preencher os horários</a></div>{html_ag_pedidos_link(slug)}"""
         return html_resp(pagina("Agenda", corpo, s, "agenda", AG_CSS))
     passo = 7 if v == "semana" else 1
     ant, prox = dia - timedelta(days=passo), dia + timedelta(days=passo)
@@ -2017,7 +2191,7 @@ def painel_agenda(d: str = "", v: str = "dia", prof: str = "", sim: int = 0, msg
     sim_ctl = ""
     if simb:
         sim_ctl = ('<div class="card"><p style="font-size:14px;color:var(--txt2)">As reservas com borda tracejada foram feitas na aba '
-                   'Experimentar. Elas não ocupam a agenda de verdade: nenhum paciente perde horário por causa delas.</p>'
+                   'Simular. Elas não ocupam a agenda de verdade: nenhum paciente perde horário por causa delas.</p>'
                    '<form method="post" action="/painel/agenda/simulacao/apagar" style="margin-top:8px">'
                    '<button class="btn sec peq">Apagar reservas de simulação</button></form></div>')
     corpo = f"{aviso}{controles}{miolo}{sim_ctl}{bloquear}{html_ag_pedidos_link(slug)}"
@@ -2090,7 +2264,7 @@ def painel_agenda_item(iid: str, erro: str = "", msg: str = "", s: dict = Depend
     if tel and not it.get("sim") and R.exists(K(slug, "conv", tel)):
         conversa = f' · <a href="/painel/conversa/{tel}">ver conversa</a>'
     contato = (f'<span class="mono">{fmt_tel(tel)}</span>{conversa}' if tel else
-               ("simulação (aba Experimentar)" if it.get("sim") else "sem WhatsApp"))
+               ("simulação (aba Simular)" if it.get("sim") else "sem WhatsApp"))
     mud = "".join(f'<li>{esc(m.get("acao"))} por {esc(m.get("por") or "-")} {ha_quanto(m.get("em", "") + "-03:00")}'
                   f'{(" (antes: " + esc(m["antes"]) + ")") if m.get("antes") else ""}</li>' for m in it.get("mudancas", []))
     cancelada = it.get("status") == "cancelada"
@@ -2211,45 +2385,203 @@ def painel_agenda_sim_apagar(s: dict = Depends(exigir_login)):
 
 
 # ============================================================
-# CONFIGURACOES
+# PROFISSIONAIS (cada um vira um card; adicionar e editar abrem um painel ao lado / folha de baixo no celular)
 # ============================================================
 PROF_CAMPOS = (("nome", "Nome", "Dra. Ana Souza"),
                ("especialidades", "Especialidades", "Ortodontia, clareamento"),
-               ("horarios", "Observação sobre horários (opcional)", "Avaliação só às segundas"),
                ("convenios", "Convênios que atende", "Unimed Odonto, Amil Dental, particular"),
-               ("obs", "Observações", "Não atende criança"))
+               ("horarios", "Observação sobre horários (opcional)", "Avaliação só às segundas"),
+               ("obs", "Outras observações (opcional)", "Não atende criança"))
 
 
-def html_prof(i: int, x: dict) -> str:
-    campos = "".join(
-        f'<div><label>{rot}</label><input type="text" name="prof_{ch}_{i}" value="{esc(x.get(ch, ""))}" placeholder="{esc(ex)}"></div>'
-        for ch, rot, ex in PROF_CAMPOS)
-    remover = (f'<label style="margin-top:10px"><input type="checkbox" name="prof_remover_{i}" value="1"> Remover este profissional</label>'
-               if x.get("nome") else '<p style="font-size:13px;color:var(--txt2);margin-top:10px">Preencha para adicionar um profissional.</p>')
+def iniciais(nome: str) -> str:
+    partes = [p for p in (nome or "").split() if p.lower().rstrip(".") not in ("dr", "dra", "doutor", "doutora")]
+    if len(partes) > 1:
+        partes = [partes[0], partes[-1]]
+    return "".join(p[0] for p in partes).upper() or "?"
+
+
+def html_prof_card(x: dict) -> str:
+    pid = esc(x.get("id", ""))
+    dias = "".join(f'<span class="{"on" if AG.intervalos_do_dia(x, d) else ""}" title="{AG.DIAS_LONGOS[d]}">'
+                   f'{AG.DIAS_CURTOS[d][:3].capitalize()}</span>' for d in range(7))
+    resumo = AG.resumo_semana(x)
+    convs = [c.strip() for c in (x.get("convenios") or "").split(",") if c.strip()]
+    tags = "".join(f'<span class="tag">{esc(c)}</span>' for c in convs[:4])
+    if len(convs) > 4:
+        tags += f'<span class="tag">+{len(convs) - 4}</span>'
+    agenda_txt = (f'<p class="nota mono" style="font-size:12px">{esc(resumo)}</p>' if resumo else
+                  '<p class="nota">Sem horários: o assistente anota o pedido e a recepção confirma. '
+                  f'<a href="/painel/profissionais?editar={pid}">Preencher horários</a></p>')
+    return f"""<div class="icard">
+      <div class="top"><span class="av">{esc(iniciais(x.get("nome", "")))}</span>
+        <div style="min-width:0;flex:1"><h3>{esc(x.get("nome", ""))}</h3>
+          <div class="sub">{esc(x.get("especialidades") or "Sem especialidade informada")}</div></div>
+        <details class="mais"><summary aria-label="Mais opções">{icone("mais")}</summary><div>
+          <a href="/painel/profissionais?editar={pid}">Editar</a>
+          <a href="/painel/agenda?v=semana&prof={pid}">Ver na agenda</a>
+          <a class="perigo" href="/painel/profissionais?remover={pid}">Remover</a></div></details></div>
+      <div class="dias">{dias}</div>{agenda_txt}
+      {f'<div class="meta">{tags}</div>' if tags else ''}</div>"""
+
+
+def html_prof_form(x: dict) -> str:
+    novo = not x.get("id")
+
+    def campo(ch, rot, ex):
+        return (f'<label for="f-{ch}">{rot}</label><input id="f-{ch}" type="text" name="prof_{ch}" '
+                f'value="{esc(x.get(ch, ""))}" placeholder="{esc(ex)}"{" required" if ch == "nome" else ""}>')
+    c = {ch: campo(ch, rot, ex) for ch, rot, ex in PROF_CAMPOS}
     ag = x.get("agenda") or {}
     dias = ag.get("dias") or {}
-    grade = "".join(
-        f'<div><label>{AG.DIAS_CURTOS[d].capitalize()}</label><input type="text" name="prof_ag{d}_{i}" '
-        f'value="{esc(dias.get(str(d), ""))}"></div>' for d in range(7))
-    entendido = AG.resumo_semana(x)
-    leitura = (f'<p style="font-size:13px;margin-top:8px">Agenda: <b>{esc(entendido)}</b></p>' if entendido else
-               '<p style="font-size:13px;color:var(--txt2);margin-top:8px">Sem horários aqui, o assistente só anota o pedido '
-               'e a recepção confirma. Com horários, ele marca direto na Agenda.</p>')
-    agenda_html = (f'<div style="margin-top:12px;padding-top:6px;border-top:1px solid var(--linha)">'
-                   f'<b style="font-size:14px">Horários de atendimento</b>'
-                   f'<div class="semana">{grade}<div><label>Consulta (min)</label>'
-                   f'<input type="number" min="5" max="480" step="5" name="prof_dur_{i}" value="{esc(ag.get("duracao") or AG.DURACAO_PADRAO)}"></div></div>'
-                   f'{leitura}</div>')
-    return (f'<div class="prof"><input type="hidden" name="prof_id_{i}" value="{esc(x.get("id", ""))}">'
-            f'<div class="grid2">{campos}</div>{agenda_html}{remover}</div>')
+    linhas = "".join(
+        f'<div class="hdia"><label class="sw"><input type="checkbox" data-dia="{d}"{" checked" if dias.get(str(d), "").strip() else ""}>'
+        f'<span>{AG.DIAS_LONGOS[d].split("-")[0].capitalize()}</span></label>'
+        f'<input type="text" class="mono" name="prof_ag{d}" value="{esc(dias.get(str(d), ""))}" '
+        f'placeholder="{"8h-12h, 14h-18h" if d < 5 else "não atende"}" aria-label="Horário de {AG.DIAS_LONGOS[d]}"></div>'
+        for d in range(7))
+    titulo = "Novo profissional" if novo else "Editar profissional"
+    return f"""<div class="folha-fundo"></div>
+    <form class="folha" method="post" action="/painel/profissionais" role="dialog" aria-modal="true" aria-label="{titulo}">
+      <div class="fcab"><h2>{titulo}</h2><a class="fechar" href="/painel/profissionais" aria-label="Fechar">&times;</a></div>
+      <div class="fcorpo">
+        <input type="hidden" name="prof_id" value="{esc(x.get("id", ""))}">
+        <div class="bloco"><span class="rot">Quem é</span>{c["nome"]}{c["especialidades"]}{c["convenios"]}</div>
+        <div class="bloco"><span class="rot">Quando atende</span>
+          <p style="font-size:13px;color:var(--txt2);margin:4px 0 6px">Escreva do jeito que você falaria: <span class="mono">8h-12h, 14h-18h</span>.
+          Com horários aqui, o assistente marca direto na agenda. Sem horários, ele anota o pedido e a recepção confirma.</p>
+          <div class="hgrade">{linhas}</div>
+          <button type="button" class="btn sec peq" id="copiar-seg" style="margin-top:10px">Repetir a segunda de terça a sexta</button>
+          <div class="grid2" style="margin-top:4px">
+            <div><label for="f-dur">Cada consulta dura (min)</label>
+              <input id="f-dur" type="number" min="5" max="480" step="5" name="prof_dur" value="{esc(ag.get("duracao") or AG.DURACAO_PADRAO)}"></div>
+          </div>{c["horarios"]}</div>
+        <div class="bloco"><span class="rot">Mais alguma coisa</span>{c["obs"]}</div>
+      </div>
+      <div class="fpe"><a class="btn sec" href="/painel/profissionais">Cancelar</a><button class="btn">{"Adicionar" if novo else "Salvar"}</button></div>
+    </form>"""
 
 
+def html_prof_remover(x: dict) -> str:
+    return f"""<div class="folha-fundo"></div>
+    <form class="folha" method="post" action="/painel/profissionais/{esc(x["id"])}/remover" role="dialog" aria-modal="true" style="height:auto">
+      <div class="fcab"><h2>Remover {esc(x.get("nome", ""))}?</h2><a class="fechar" href="/painel/profissionais" aria-label="Fechar">&times;</a></div>
+      <div class="fcorpo"><p style="margin-top:12px">O assistente deixa de oferecer horários com {esc(nome_conversa(x.get("nome", "")) or "este profissional")}.
+        As consultas que já estão na agenda continuam lá.</p></div>
+      <div class="fpe"><a class="btn sec" href="/painel/profissionais">Cancelar</a><button class="btn perigo">Remover</button></div>
+    </form>"""
+
+
+PROF_CSS = """<style>
+.hgrade{display:flex;flex-direction:column;gap:6px}
+.hdia{display:grid;grid-template-columns:118px 1fr;gap:10px;align-items:center}
+.hdia input[type=text]{padding:8px 11px;font-size:14px}
+.hdia input[type=text]:disabled{background:var(--papel);color:#A0AEC0}
+.sw{display:flex;align-items:center;gap:8px;margin:0;font-size:14.5px;color:var(--tinta);cursor:pointer}
+.sw input{appearance:none;-webkit-appearance:none;width:34px;height:20px;border-radius:20px;background:var(--linha);position:relative;cursor:pointer;flex:none;transition:background .15s}
+.sw input:before{content:"";position:absolute;top:2px;left:2px;width:16px;height:16px;border-radius:50%;background:#fff;transition:transform .15s;box-shadow:0 1px 2px rgba(0,0,0,.2)}
+.sw input:checked{background:var(--tinta)}
+.sw input:checked:before{transform:translateX(14px)}
+.regras{display:grid;grid-template-columns:repeat(3,1fr);gap:12px}
+@media(max-width:700px){.regras{grid-template-columns:1fr}}
+</style>"""
+
+PROF_JS = """<script>
+(function(){var f=document.querySelector('form.folha');if(!f)return;
+var linhas=[].slice.call(f.querySelectorAll('.hdia'));
+function campo(l){return l.querySelector('input[type=text]')}
+linhas.forEach(function(l,i){var cb=l.querySelector('input[type=checkbox]'),t=campo(l);
+  function sinc(){t.disabled=!cb.checked;}
+  cb.addEventListener('change',function(){if(cb.checked&&!t.value.trim()){
+      for(var j=i-1;j>=0;j--){var v=campo(linhas[j]).value.trim();if(v&&!campo(linhas[j]).disabled){t.value=v;break;}}
+      if(!t.value)t.value='8h-12h, 14h-18h';}
+    if(!cb.checked)t.dataset.antes=t.value;sinc();if(cb.checked)t.focus();});
+  t.addEventListener('input',function(){if(t.value.trim()&&!cb.checked){cb.checked=true;sinc();}});
+  sinc();});
+f.addEventListener('submit',function(){linhas.forEach(function(l){var t=campo(l);if(t.disabled){t.disabled=false;t.value='';}})});
+var cp=document.getElementById('copiar-seg');if(cp)cp.addEventListener('click',function(){var v=campo(linhas[0]).value.trim();if(!v)return;
+  for(var i=1;i<5;i++){campo(linhas[i]).value=v;linhas[i].querySelector('input[type=checkbox]').checked=true;campo(linhas[i]).disabled=false;}});
+var n=f.querySelector('input[name=prof_nome]');if(n&&!n.value)n.focus();})();
+</script>"""
+
+
+@router.get("/painel/profissionais", response_class=HTMLResponse)
+def painel_profissionais(novo: int = 0, editar: str = "", remover: str = "", msg: str = "", s: dict = Depends(exigir_login)):
+    conf = obter_conf(s["clinica"]["slug"])
+    profs = [x for x in conf["profissionais"] if x.get("nome")]
+    por_id = {x.get("id"): x for x in profs}
+    aviso = f'<div class="aviso">{esc(msg)}</div>' if msg else ""
+    if profs:
+        lista = ('<div class="lista">' + "".join(html_prof_card(x) for x in profs)
+                 + '<a class="icard icard-novo" href="/painel/profissionais?novo=1"><i>+</i>Adicionar profissional</a></div>')
+    else:
+        lista = """<div class="vazia">""" + simbolo(56, False) + """
+          <h2>Quem atende na clínica?</h2>
+          <p>Cadastre cada profissional com os dias e horários. O assistente usa isso para oferecer só horários livres e marcar direto na agenda.</p>
+          <a class="btn" href="/painel/profissionais?novo=1">Adicionar o primeiro profissional</a></div>"""
+    folha = ""
+    if novo:
+        folha = html_prof_form({})
+    elif editar and editar in por_id:
+        folha = html_prof_form(por_id[editar])
+    elif remover and remover in por_id:
+        folha = html_prof_remover(por_id[remover])
+    botao = '<a class="btn" href="/painel/profissionais?novo=1">+ Adicionar</a>' if profs else ""
+    corpo = f"""{aviso}<div class="cab"><div><h1>Profissionais</h1>
+      <p>O assistente só oferece ao paciente os horários livres de quem está aqui.</p></div>{botao}</div>
+    {lista}{folha}"""
+    return html_resp(pagina("Profissionais", corpo + PROF_JS, s, "profs", PROF_CSS))
+
+
+@router.post("/painel/profissionais")
+async def painel_profissionais_post(request: Request, s: dict = Depends(exigir_login)):
+    slug = s["clinica"]["slug"]
+    f = await request.form()
+    conf = obter_conf(slug)
+    x = {ch: str(f.get(f"prof_{ch}", "")).strip()[:500] for ch, _, _ in PROF_CAMPOS}
+    if not x["nome"]:
+        return RedirectResponse("/painel/profissionais?novo=1", status_code=303)
+    pid = re.sub(r"[^a-z0-9]", "", str(f.get("prof_id", "")))[:16]
+    dur = so_digitos(f.get("prof_dur", ""))
+    x["agenda"] = {"dias": {str(d): str(f.get(f"prof_ag{d}", "")).strip()[:120] for d in range(7)},
+                   "duracao": max(5, min(480, int(dur))) if dur else AG.DURACAO_PADRAO}
+    for i, p in enumerate(conf["profissionais"]):
+        if pid and p.get("id") == pid:
+            conf["profissionais"][i] = {**p, **x, "id": pid}
+            m = f"Alterações em {x['nome']} salvas. O assistente já usa na próxima mensagem."
+            break
+    else:
+        x["id"] = secrets.token_hex(4)
+        conf["profissionais"].append(x)
+        m = f"Pronto: {x['nome']} está na lista. O assistente já usa na próxima mensagem."
+    conf["atualizado_em"] = agora().isoformat(timespec="seconds")
+    conf["atualizado_por"] = s["usuario"]["email"]
+    salvar_conf(slug, conf)
+    return RedirectResponse("/painel/profissionais?msg=" + quote(m), status_code=303)
+
+
+@router.post("/painel/profissionais/{pid}/remover")
+def painel_profissionais_remover(pid: str, s: dict = Depends(exigir_login)):
+    slug = s["clinica"]["slug"]
+    conf = obter_conf(slug)
+    antes = len(conf["profissionais"])
+    nome = next((p.get("nome", "") for p in conf["profissionais"] if p.get("id") == pid), "")
+    conf["profissionais"] = [p for p in conf["profissionais"] if p.get("id") != pid]
+    if len(conf["profissionais"]) != antes:
+        conf["atualizado_em"] = agora().isoformat(timespec="seconds")
+        conf["atualizado_por"] = s["usuario"]["email"]
+        salvar_conf(slug, conf)
+    return RedirectResponse("/painel/profissionais?msg=" + quote(f"{nome or 'O profissional'} saiu da lista."), status_code=303)
+
+
+# ============================================================
+# SUA CLÍNICA (o que o assistente sabe sobre a clínica)
+# ============================================================
 @router.get("/painel/configuracoes", response_class=HTMLResponse)
 def painel_config(salvo: str = "", s: dict = Depends(exigir_login)):
     c = s["clinica"]
     conf = obter_conf(c["slug"])
     profs = [x for x in conf["profissionais"] if x.get("nome")]
-    profs_html = "".join(html_prof(i, x) for i, x in enumerate(profs)) + html_prof(len(profs), {})
 
     def campo(ch, rot, ex, area=False):
         if area:
@@ -2257,9 +2589,17 @@ def painel_config(salvo: str = "", s: dict = Depends(exigir_login)):
         return f'<label>{rot}</label><input type="text" name="{ch}" value="{esc(conf.get(ch, ""))}" placeholder="{esc(ex)}">'
 
     aviso = '<div class="aviso">Salvo. O assistente já usa as novas informações na próxima mensagem.</div>' if salvo else ""
-    corpo = f"""{aviso}<form method="post">
+    if profs:
+        nomes = ", ".join(esc(x["nome"]) for x in profs[:4]) + (f" e mais {len(profs) - 4}" if len(profs) > 4 else "")
+        com_ag = sum(1 for x in profs if AG.tem_agenda(x))
+        resumo_profs = (f'<p style="font-size:14.5px"><b class="mono">{len(profs)}</b> cadastrados: {nomes}.</p>'
+                        f'<p style="font-size:13px;color:var(--txt2);margin-top:2px">{com_ag} com horários na agenda.</p>')
+    else:
+        resumo_profs = '<p style="font-size:14.5px;color:var(--txt2)">Ninguém cadastrado ainda.</p>'
+    corpo = f"""{aviso}<div class="cab"><div><h1>Sua clínica</h1>
+      <p>Tudo o que estiver aqui o assistente usa para responder. O que não estiver, ele passa para a equipe.</p></div></div>
+    <form method="post">
     <div class="card"><h2>A clínica</h2>
-      <p style="color:var(--txt2);font-size:14px">Tudo o que estiver aqui o assistente usa para responder. O que não estiver, ele passa para a equipe.</p>
       <div class="grid2">
         <div>{campo('nome_assistente', 'Como o assistente se apresenta', 'Assistente da ' + c['nome'])}</div>
         <div>{campo('endereco', 'Endereço', 'Rua X, 123, sala 4, Porto Alegre')}</div>
@@ -2268,17 +2608,15 @@ def painel_config(salvo: str = "", s: dict = Depends(exigir_login)):
       </div>
       {campo('convenios', 'Convênios aceitos pela clínica', 'Unimed Odonto, Amil Dental, OdontoPrev', True)}
     </div>
-    <div class="card"><h2>Profissionais</h2>
-      <p style="color:var(--txt2);font-size:14px;margin-bottom:10px">Preencha os horários de cada dia (ex.: <span class="mono">8h-12h, 14h-18h</span>).
-      O assistente oferece ao paciente só os horários livres e marca direto na <a href="/painel/agenda">Agenda</a>.</p>
-      {profs_html}
-      <p style="font-size:13px;color:var(--txt2)">Para incluir mais de um de cada vez, salve e preencha o novo espaço que aparece.</p>
-      <div class="grid2" style="margin-top:6px">
+    <div class="card"><div class="linha" style="justify-content:space-between;margin-bottom:8px"><h2 style="margin:0">Profissionais</h2>
+      <a class="btn sec peq" href="/painel/profissionais">{'Ver e editar' if profs else 'Adicionar'}</a></div>{resumo_profs}</div>
+    <div class="card"><h2>Agenda</h2>
+      <div class="grid2">
         <div>{campo('ag_antecedencia_h', 'Antecedência mínima para o assistente marcar (horas)', str(AG.ANTECEDENCIA_H_PADRAO))}</div>
         <div>{campo('ag_janela_dias', 'Marcar até quantos dias à frente', str(AG.JANELA_DIAS_PADRAO))}</div>
       </div>
-      <label style="margin-top:10px"><input type="checkbox" name="atende_feriados" value="1"{' checked' if conf.get('atende_feriados') == '1' else ''}>
-        A clínica atende em feriados nacionais (Natal, Ano-Novo, Sexta-feira Santa...)</label>
+      <label style="margin-top:14px;display:flex;gap:8px;align-items:flex-start;color:var(--tinta);font-size:14.5px"><input type="checkbox" name="atende_feriados" value="1"{' checked' if conf.get('atende_feriados') == '1' else ''} style="margin-top:4px">
+        <span>A clínica atende em feriados nacionais (Natal, Ano-Novo, Sexta-feira Santa...)</span></label>
       <p style="font-size:13px;color:var(--txt2)">Desmarcado, o assistente não oferece horário nesses dias. Feriado da cidade ou do estado: use Bloquear horário na Agenda.</p>
       </div>
     <div class="card"><h2>Regras</h2>
@@ -2287,12 +2625,13 @@ def painel_config(salvo: str = "", s: dict = Depends(exigir_login)):
       <p style="font-size:13px;color:var(--txt2);margin-top:8px">Por padrão o assistente já passa para a equipe quando o paciente pede uma pessoa,
       em urgência ou dor forte, reclamação, remarcação, cancelamento ou pergunta que não está aqui.</p>
     </div>
-    <div class="linha" style="margin-bottom:16px"><button class="btn">Salvar</button></div>
+    <div class="linha" style="margin-bottom:16px"><button class="btn">Salvar</button>
+      <a href="/painel/experimentar" style="font-size:14px">Ver como ele responde</a></div>
     </form>
     <div class="card"><details><summary>Ver o texto que o assistente recebe</summary><pre>{esc(montar_prompt(c, conf))}</pre></details></div>
     <div class="card"><h2>Acesso</h2><p style="font-size:14px">Você entrou como <b>{esc(s['usuario']['email'])}</b>.
       <a href="/painel/senha">Trocar senha</a></p></div>"""
-    return html_resp(pagina("Configurações", corpo, s, "config"))
+    return html_resp(pagina("Sua clínica", corpo, s, "config"))
 
 
 @router.post("/painel/configuracoes")
@@ -2306,20 +2645,7 @@ async def painel_config_post(request: Request, s: dict = Depends(exigir_login)):
     for ch, maximo in (("ag_antecedencia_h", 240), ("ag_janela_dias", 180)):
         v = so_digitos(f.get(ch, ""))
         conf[ch] = str(min(int(v), maximo)) if v else ""
-    profs = []
-    for i in range(60):
-        if f.get(f"prof_nome_{i}") is None:
-            break
-        if f.get(f"prof_remover_{i}"):
-            continue
-        x = {ch: str(f.get(f"prof_{ch}_{i}", "")).strip()[:500] for ch, _, _ in PROF_CAMPOS}
-        x["id"] = re.sub(r"[^a-z0-9]", "", str(f.get(f"prof_id_{i}", "")))[:16] or secrets.token_hex(4)
-        dur = so_digitos(f.get(f"prof_dur_{i}", ""))
-        x["agenda"] = {"dias": {str(d): str(f.get(f"prof_ag{d}_{i}", "")).strip()[:120] for d in range(7)},
-                       "duracao": max(5, min(480, int(dur))) if dur else AG.DURACAO_PADRAO}
-        if x["nome"]:
-            profs.append(x)
-    conf["profissionais"] = profs
+    # os profissionais têm tela própria (/painel/profissionais): aqui não mexe neles
     conf["atualizado_em"] = agora().isoformat(timespec="seconds")
     conf["atualizado_por"] = s["usuario"]["email"]
     salvar_conf(slug, conf)
@@ -3085,17 +3411,13 @@ def html_faixa_assinatura(c: dict, convite_experimentar: bool = True) -> str:
     if sit == "ativa":
         return ""
     v = valor_plano()
-    preco = f" por {fmt_reais(v)} por mês, tudo incluído" if v else ""
+    preco = f" ({fmt_reais(v)} por mês, tudo incluído)" if v else ""
     if sit == "bloqueada":
-        txt = "O pagamento da sua assinatura parou. O assistente está desligado até você assinar de novo."
-    else:
-        txt = (f"Sua conta está criada. Para a gente ligar o WhatsApp da sua clínica e o assistente começar a responder, "
-               f"falta assinar{preco}.")
-    return (f'<div class="card" style="border-color:var(--lilas);background:var(--lilas2)"><h2>Falta assinar</h2>'
-            f'<p style="font-size:14px;margin-bottom:12px">{txt}</p>'
-            f'<a class="btn" href="/assinar">Assinar agora</a> '
-            + (f'<a class="btn sec" href="/painel/experimentar">Antes, experimentar o assistente</a>' if convite_experimentar else '')
-            + '</div>')
+        return faixa("assinatura", 'O pagamento da assinatura parou e o assistente está desligado. '
+                     '<a href="/assinar">Assinar de novo</a>', erro=True)
+    convite = (' ou <a href="/painel/experimentar">veja antes como ele responde</a>' if convite_experimentar else "")
+    return faixa("assinatura", f'Falta assinar para a gente ligar o WhatsApp da clínica{preco}. '
+                 f'<a href="/assinar">Assinar agora</a>{convite}')
 
 
 @router.get("/assinar", response_class=HTMLResponse)
@@ -3278,13 +3600,24 @@ async def exp_responder(c: dict):
         exp_registrar(slug, "nota", (
             f"Aqui a recepção receberia no WhatsApp um pedido de agendamento: {pedido['nome'] or 'paciente'}, "
             f"com {pedido['profissional'] or '-'}, {pedido['quando'] or '-'}, {pedido['convenio'] or '-'}. "
-            "Para o assistente marcar direto na agenda, preencha os horários de cada profissional em Configurações."))
+            "Para o assistente marcar direto na agenda, preencha os horários de cada um em Profissionais."))
     if motivo:
         exp_registrar(slug, "nota", (
             f"Aqui o assistente pausaria e a recepção receberia um aviso para continuar a conversa. Motivo: {motivo}."))
 
 
-def html_exp_msgs(slug: str) -> str:
+def exp_sugestoes(conf: dict) -> list:
+    profs = [x for x in conf.get("profissionais", []) if x.get("nome")]
+    sug = ["Oi, queria marcar uma consulta"]
+    if profs:
+        sug.append(f"Tem horário com {nome_conversa(profs[0]['nome'])} essa semana?")
+    conv1 = next((x.strip() for x in (conf.get("convenios") or "").split(",") if x.strip()), "")
+    sug.append(f"Vocês atendem {conv1}?" if conv1 else "Vocês atendem convênio?")
+    sug += ["Quanto custa uma limpeza?", "Estou com muita dor de dente"]
+    return sug
+
+
+def html_exp_msgs(slug: str, sugestoes: list | None = None) -> str:
     itens = []
     for m in exp_hist(slug):
         hora = m.get("em", "")[11:16]
@@ -3293,28 +3626,79 @@ def html_exp_msgs(slug: str) -> str:
         else:
             itens.append(f'<div class="msg {m["papel"]}">{esc(m["texto"])}<small>{hora}</small></div>')
     if not itens:
-        return ('<div class="vazio" style="text-align:center">Escreva como se fosse um paciente. Por exemplo: '
-                '"Oi, queria marcar uma consulta" ou "Vocês atendem convênio?"</div>')
+        chips = "".join(f'<button type="button" class="chip">{esc(t)}</button>' for t in (sugestoes or [])[:4])
+        return (f'<div class="exp-vazio">{simbolo(48, False)}<b>Você é o paciente.</b>'
+                f'<span>Escreva como um paciente escreveria. O assistente responde com o que sabe da sua clínica.</span>'
+                f'<div class="chips">{chips}</div></div>')
     return "".join(itens)
 
 
 EXP_CSS = """<style>
-.exp-box{background:var(--papel);border:1px solid var(--linha);border-radius:14px;padding:14px;height:58vh;min-height:320px;overflow-y:auto}
-.exp-nota{align-self:center;max-width:90%;font-size:12px;color:var(--txt2);background:#fff;border:1px dashed var(--linha);border-radius:10px;padding:6px 10px;text-align:center}
-.exp-form{display:flex;gap:8px;margin-top:10px;align-items:flex-end}
-.exp-form textarea{min-height:44px;height:44px;flex:1}
-.exp-uso{font-family:'JetBrains Mono',monospace;font-size:12px;color:var(--txt2)}
+.exp-grid{display:grid;grid-template-columns:minmax(0,1fr) 300px;gap:28px;align-items:start}
+.fone{background:#fff;border:1px solid var(--linha);border-radius:22px;overflow:hidden;display:flex;flex-direction:column;height:calc(100vh - 80px);min-height:520px;max-height:860px;box-shadow:var(--sombra)}
+.fone-cab{display:flex;align-items:center;gap:12px;padding:12px 14px 12px 16px;background:var(--tinta);color:#fff}
+.fone-cab .av{width:40px;height:40px;background:rgba(255,255,255,.08)}
+.fone-cab .nm{flex:1;min-width:0}
+.fone-cab .nm b{display:block;font-size:15.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.fone-cab .nm small{display:block;font-size:12.5px;color:#AEB9CC}
+.fone-cab .uso{font-family:'JetBrains Mono',monospace;font-size:11.5px;color:#AEB9CC;white-space:nowrap}
+.fone-cab .mais>summary{color:#C9D2E0}
+.fone-cab .mais>summary:hover,.fone-cab .mais[open]>summary{background:rgba(255,255,255,.1);color:#fff}
+.fone-cab .mais>div{color:var(--tinta)}
+.fone .faixas{padding:10px 12px 0;background:var(--papel)}
+.fone .faixa{margin-bottom:8px;font-size:13px;padding:7px 8px 7px 12px}
+.fone-msgs{flex:1;overflow-y:auto;background:var(--papel);padding:16px 14px}
+.exp-nota{align-self:center;max-width:88%;font-size:12.5px;color:var(--txt2);background:#fff;border:1px dashed var(--lilas);border-radius:12px;padding:7px 12px;text-align:center}
+.exp-vazio{margin:auto;max-width:380px;display:flex;flex-direction:column;align-items:center;text-align:center;gap:8px;padding:30px 6px;color:var(--txt2);font-size:14px}
+.exp-vazio b{font-family:'Bricolage Grotesque',sans-serif;font-size:20px;color:var(--tinta);margin-top:6px}
+.chips{display:flex;flex-wrap:wrap;gap:8px;justify-content:center;margin-top:8px}
+@media(min-width:1100px){.exp-vazio .chips{display:none}}
+.chip{font:inherit;font-size:13.5px;padding:7px 12px;border-radius:999px;border:1px solid var(--linha);background:#fff;color:var(--tinta);cursor:pointer;text-align:left}
+.chip:hover{border-color:var(--tinta)}
+.fone-pe{border-top:1px solid var(--linha2);background:#fff;padding:10px 12px}
+.exp-form{display:flex;gap:8px;align-items:flex-end}
+.exp-form textarea{min-height:44px;height:44px;max-height:140px;flex:1;border-radius:22px;padding:11px 16px;resize:none;line-height:1.4}
+.enviar{width:44px;height:44px;border-radius:50%;flex:none;border:0;background:var(--tinta);color:#fff;display:flex;align-items:center;justify-content:center;cursor:pointer}
+.enviar:hover{background:var(--tinta2)}.enviar:disabled{opacity:.5}
+.enviar svg{width:20px;height:20px}
+.exp-fim{font-size:14px}.exp-fim b{display:block}
+.exp-lado h1{font-size:30px;font-weight:800}
+.exp-lado p{color:var(--txt2);font-size:14.5px;margin-top:8px}
+.exp-lado .rot{display:block;margin:24px 0 10px}
+.exp-lado .chips{justify-content:flex-start}
+.exp-lado .ref{display:flex;flex-direction:column;gap:8px}
+.exp-lado .ref a{display:flex;justify-content:space-between;gap:10px;background:#fff;border:1px solid var(--linha);border-radius:12px;padding:11px 14px;text-decoration:none;font-size:14.5px}
+.exp-lado .ref a:hover{border-color:var(--tinta)}
+.exp-lado .ref a span{color:var(--txt2);font-size:13px}
+@media(max-width:1099px){.exp-grid{grid-template-columns:1fr}.exp-lado{display:none}}
+@media(max-width:899px){
+  body.cheia .topo{display:none}
+  body.cheia main{padding:0}
+  body.cheia main>.aviso{margin:0;border-radius:0}
+  .fone{border:0;border-radius:0;box-shadow:none;height:calc(100dvh - var(--baixo) - env(safe-area-inset-bottom));min-height:0;max-height:none}
+  .fone-cab{padding:10px 8px 10px 12px;padding-top:calc(10px + env(safe-area-inset-top))}
+}
 </style>"""
 
 EXP_JS = """<script>
 (function(){var b=document.getElementById('exp-box');if(b)b.scrollTop=b.scrollHeight;
-var f=document.getElementById('exp-form');if(!f)return;var t=f.querySelector('textarea');
-t.focus();
-t.addEventListener('keydown',function(e){if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();if(t.value.trim())f.requestSubmit();}});
-f.addEventListener('submit',function(){var bt=f.querySelector('button');bt.disabled=true;bt.textContent='Respondendo...';
+var f=document.getElementById('exp-form');
+document.querySelectorAll('.chip').forEach(function(c){c.addEventListener('click',function(){
+  if(!f)return;var t=f.querySelector('textarea');t.value=c.textContent;f.requestSubmit();});});
+if(!f)return;var t=f.querySelector('textarea');
+function ajusta(){t.style.height='44px';t.style.height=Math.min(t.scrollHeight+2,140)+'px';}
+t.addEventListener('input',ajusta);
+if(window.matchMedia('(min-width:900px)').matches)t.focus();
+t.addEventListener('keydown',function(e){if(e.key==='Enter'&&!e.shiftKey&&window.matchMedia('(min-width:900px)').matches){e.preventDefault();if(t.value.trim())f.requestSubmit();}});
+f.addEventListener('submit',function(){var bt=f.querySelector('button');bt.disabled=true;
 var d=document.createElement('div');d.className='msg paciente';d.textContent=t.value;var c=b.querySelector('.chat');
-var v=c.querySelector('.vazio');if(v)v.remove();c.appendChild(d);b.scrollTop=b.scrollHeight;});})();
+var v=c.querySelector('.exp-vazio');if(v)v.remove();c.appendChild(d);
+var e=document.createElement('div');e.className='exp-nota';e.textContent='digitando...';c.appendChild(e);
+b.scrollTop=b.scrollHeight;});})();
 </script>"""
+
+_SETA = ('<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" '
+         'stroke-linejoin="round" aria-hidden="true"><path d="M5 12h14M13 6l6 6-6 6"/></svg>')
 
 
 @router.get("/painel/experimentar", response_class=HTMLResponse)
@@ -3324,37 +3708,54 @@ def painel_experimentar(msg: str = "", s: dict = Depends(exigir_login)):
     usado, limite = exp_uso_hoje(slug), exp_limite(c)
     info = exp_info(slug)
     conf = obter_conf(slug)
+    profs = [x for x in conf["profissionais"] if x.get("nome")]
+    sug = exp_sugestoes(conf)
     aviso = f'<div class="aviso">{esc(msg)}</div>' if msg else ""
-    falta_conf = "" if (conf.get("funcionamento") or [x for x in conf["profissionais"] if x.get("nome")]) else (
-        '<div class="aviso erro">O assistente ainda sabe pouco sobre a sua clínica. Preencha '
-        '<a href="/painel/configuracoes">Configurações</a> (horários, profissionais, convênios) e volte aqui: '
-        'ele passa a responder com essas informações na hora.</div>')
+    faixas = ""
+    if not (conf.get("funcionamento") or profs):
+        faixas += faixa("exp-sabe-pouco", 'Ele ainda sabe pouco da sua clínica. '
+                        '<a href="/painel/configuracoes">Contar sobre a clínica</a>', erro=True)
+    faixas += html_faixa_assinatura(c, False)
     if usado >= limite:
         if info.get("pedido_cota_em"):
-            rodape = ('<div class="card" style="margin-top:10px"><b>Você usou as mensagens de hoje.</b> '
-                      '<p style="font-size:14px;margin-top:4px">Seu pedido de mais mensagens foi enviado. A gente libera em breve. '
-                      'Amanhã o contador também volta a zero.</p></div>')
+            rodape = ('<div class="exp-fim"><b>Você usou as mensagens de hoje.</b>'
+                      '<span style="color:var(--txt2)">Seu pedido de mais mensagens foi enviado. A gente libera em breve. '
+                      'Amanhã o contador também volta a zero.</span></div>')
         else:
-            rodape = (f'<div class="card" style="margin-top:10px"><b>Você usou as {limite} mensagens de hoje.</b>'
-                      '<p style="font-size:14px;margin:4px 0 10px">Amanhã o contador volta a zero. Quer continuar hoje?</p>'
-                      '<form method="post" action="/painel/experimentar/mais"><button class="btn lil">Pedir mais mensagens</button></form></div>')
+            rodape = (f'<div class="exp-fim linha"><div style="flex:1;min-width:200px"><b>Você usou as {limite} mensagens de hoje.</b>'
+                      '<span style="color:var(--txt2)">Amanhã o contador volta a zero.</span></div>'
+                      '<form method="post" action="/painel/experimentar/mais"><button class="btn lil peq">Pedir mais mensagens</button></form></div>')
     else:
         rodape = (f'<form method="post" action="/painel/experimentar" class="exp-form" id="exp-form">'
-                  f'<textarea name="texto" maxlength="{EXP_MAX_CHARS}" placeholder="Escreva como paciente..." required></textarea>'
-                  f'<button class="btn">Enviar</button></form>')
-    corpo = f"""{aviso}{falta_conf}
-    <div class="card"><h2>Experimente o seu assistente</h2>
-      <p style="font-size:14px;color:var(--txt2);margin-bottom:12px">Converse com ele fazendo o papel de um paciente.
-      Ele responde com o que está em <a href="/painel/configuracoes">Configurações</a>: mudou lá, ele já responde diferente aqui.
-      Nada sai pelo WhatsApp e nenhum paciente vê esta conversa.</p>
-      <div class="exp-box" id="exp-box"><div class="chat">{html_exp_msgs(slug)}</div></div>
-      {rodape}
-      <div style="display:flex;justify-content:space-between;align-items:center;margin-top:10px;gap:10px;flex-wrap:wrap">
-        <span class="exp-uso">{min(usado, limite)} de {limite} mensagens hoje</span>
-        <form method="post" action="/painel/experimentar/limpar" class="in"><button class="btn sec peq">Começar outra conversa</button></form>
-      </div></div>
-    {html_faixa_assinatura(c, False)}"""
-    return html_resp(pagina("Experimentar", corpo + EXP_JS, s, "experimentar", EXP_CSS))
+                  f'<textarea name="texto" maxlength="{EXP_MAX_CHARS}" placeholder="Escreva como paciente..." rows="1" required '
+                  f'aria-label="Mensagem do paciente"></textarea>'
+                  f'<button class="enviar" aria-label="Enviar">{_SETA}</button></form>')
+    nome_ass = conf.get("nome_assistente") or f"Assistente da {c['nome']}"
+    menu = (f'<details class="mais"><summary aria-label="Mais opções">{icone("mais")}</summary><div>'
+            f'<form method="post" action="/painel/experimentar/limpar"><button>Começar outra conversa</button></form>'
+            f'<a href="/painel/configuracoes">Mudar o que ele sabe</a><a href="/painel/profissionais">Profissionais e horários</a></div></details>')
+    chips = "".join(f'<button type="button" class="chip">{esc(t)}</button>' for t in sug)
+    com_ag = sum(1 for x in profs if AG.tem_agenda(x))
+    corpo = f"""{aviso}<div class="exp-grid">
+    <section class="fone">
+      <div class="fone-cab"><span class="av">{simbolo(26)}</span>
+        <div class="nm"><b>{esc(nome_ass)}</b><small>Simulação · nada sai pelo WhatsApp</small></div>
+        <span class="uso" title="Mensagens usadas hoje">{min(usado, limite)}/{limite}</span>{menu}</div>
+      {f'<div class="faixas">{faixas}</div>' if faixas else ''}
+      <div class="fone-msgs" id="exp-box"><div class="chat">{html_exp_msgs(slug, sug)}</div></div>
+      <div class="fone-pe">{rodape}</div>
+    </section>
+    <aside class="exp-lado">
+      <span class="rot">Simular</span>
+      <h1>Seja o paciente</h1>
+      <p>Converse com o assistente como se fosse um paciente. Ele responde com o que está em Sua clínica e Profissionais:
+      mudou lá, ele já responde diferente aqui. Nenhum paciente vê esta conversa.</p>
+      <span class="rot">Comece por aqui</span><div class="chips">{chips}</div>
+      <span class="rot">Ele responde com</span>
+      <div class="ref"><a href="/painel/configuracoes">Sua clínica <span>endereço, convênios, regras</span></a>
+        <a href="/painel/profissionais">Profissionais <span class="mono">{len(profs)} · {com_ag} com horários</span></a></div>
+    </aside></div>"""
+    return html_resp(pagina("Simular", corpo + EXP_JS, s, "experimentar", EXP_CSS, classe="cheia"))
 
 
 @router.post("/painel/experimentar")
