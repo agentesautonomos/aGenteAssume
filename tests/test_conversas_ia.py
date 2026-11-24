@@ -35,7 +35,9 @@ CENARIOS = [
      "O Dr. Fabio não atende quarta nem de manhã. O assistente deve dizer isso e oferecer dias/horários reais dele "
      "(seg, ter ou qui à tarde) ou a Dra. Ana na quarta. Não pode oferecer o Fabio na quarta.", None),
     ("amanha_a_tarde", ["Boa tarde! Vocês têm horário amanhã à tarde?"],
-     "Amanhã é terça 24/11. Deve oferecer horários livres de verdade na tarde de 24/11 (Ana ou Fabio).", None),
+     "Amanhã é terça 24/11 e à tarde atendem a Dra. Ana e o Dr. Fabio. Deve perguntar se o paciente tem preferência "
+     "de profissional citando os dois, ou mostrar horários livres de verdade da tarde de 24/11 de cada um e perguntar só "
+     "qual prefere. Uma pergunta só.", None),
     ("dia_25_marca", ["Oi, meu nome é Joana Prado. Queria dia 25 às 15h com a Dra. Ana, particular."],
      "Dia 25 é quarta 25/11. 15:00 está livre para a Ana. Deve marcar e confirmar quarta 25/11 às 15h com a Dra. Ana.", None),
     ("semana_que_vem_quinta", ["Quero marcar com o Dr. Fabio na quinta da semana que vem, meu nome é Rui, particular"],
@@ -57,6 +59,23 @@ CENARIOS = [
     ("natal", ["Tem horário dia 25 de dezembro com a Dra. Ana?"],
      "Agora é 20/12. 25/12 é Natal, a clínica não atende. Deve dizer isso e oferecer outro dia real.",
      datetime(2026, 12, 20, 13, 0, tzinfo=timezone.utc)),
+    # regras de conversa: preferência de profissional, preferência de horário, uma pergunta por vez
+    ("quero_marcar_passo_a_passo", ["Oi, queria marcar uma consulta", "Tanto faz", "Pode ser amanhã no final do dia"],
+     "Na 1ª resposta deve perguntar só se tem preferência de profissional (citando Dra. Ana e Dr. Fabio). "
+     "Depois do 'tanto faz', deve perguntar só o dia e o período que prefere. Depois de 'amanhã no final do dia' "
+     "(terça 24/11, a partir das 16h), deve oferecer horários livres de verdade de 24/11 a partir das 16h "
+     "(Ana 16h, 16h30, 17h, 17h30; Fabio 16h, 17h) e não pedir nome antes disso. Uma pergunta por mensagem.", None),
+    ("ana_sem_dia", ["Quero marcar com a Dra. Ana"],
+     "Profissional já dito. Deve perguntar qual dia e período o paciente prefere (uma pergunta só). "
+     "Não deve perguntar nome nem convênio ainda.", None),
+    ("fabio_fim_da_tarde", ["Queria marcar com o Dr. Fabio na quinta, mas só consigo no fim da tarde, depois do trabalho"],
+     "Quinta 26/11; fim da tarde = a partir das 16h. O Fabio atende quinta 14h-18h (consultas de 1h): "
+     "deve oferecer 16h e/ou 17h de 26/11, não 14h ou 15h.", None),
+    ("ana_cedinho", ["Tem horário com a Dra. Ana amanhã bem cedo?"],
+     "Amanhã é terça 24/11; cedo = primeiros horários da manhã. Deve oferecer 8h, 8h30 (ou próximos da manhã) de 24/11.", None),
+    ("hora_do_almoco", ["Consigo na hora do almoço na quarta com a Dra. Ana?"],
+     "Quarta 25/11, hora do almoço = 11h às 14h. A Ana atende 8-12 e 14-18: deve oferecer 11h ou 11h30 de 25/11 "
+     "(pode citar 14h como alternativa). Não pode inventar 12h, 12h30, 13h ou 13h30.", None),
     ("preco", ["Quanto custa um clareamento?"],
      "Não há preço nas informações da clínica. Não pode inventar preço; deve dizer que a equipe informa e encaminhar.", None),
 ]
@@ -83,8 +102,13 @@ def _juiz(fatos: str, conversa: str, esperado: str) -> dict:
         f"FATOS VERDADEIROS (agenda, data de hoje, regras):\n{fatos}\n\n"
         f"O QUE SE ESPERA NESTE CENÁRIO:\n{esperado}\n\n"
         f"CONVERSA (com as consultas feitas à agenda):\n{conversa}\n\n"
+        "REGRAS DE CONVERSA: no máximo uma pergunta por mensagem (mostrar as opções de cada profissional e perguntar só "
+        "'qual prefere?' conta como uma pergunta só e cobre a preferência de profissional); para marcar, perguntar a preferência de profissional "
+        "(se o paciente não disse) e a preferência de dia/período (se não disse) antes de pedir nome ou convênio; "
+        "oferecer só horários dentro do período pedido (manhã/cedo antes das 12h, almoço 11h-14h, tarde 12h-18h, "
+        "final do dia/fim da tarde/depois do trabalho a partir das 16h, noite a partir das 18h).\n\n"
         "O assistente disse algo falso em relação aos fatos (dia, data, horário, profissional, convênio, preço), "
-        "ofereceu horário que a agenda não mostrou como livre, ou deixou de fazer o esperado? "
+        "ofereceu horário que a agenda não mostrou como livre, quebrou uma das regras de conversa, ou deixou de fazer o esperado? "
         'Responda só com JSON: {"ok": true ou false, "problemas": ["..."]}'
     )
     r = CL.claude().messages.create(model=MODELO_JUIZ, max_tokens=4000, messages=[{"role": "user", "content": pedido}])
@@ -166,6 +190,9 @@ def test_conversa(nome, mensagens, esperado, instante, conf, relogio, monkeypatc
         problemas.append("falou robô/bot")
     if EMOJI.search(falas):
         problemas.append("usou emoji")
+    for l in linhas:
+        if l.startswith("Assistente:") and l.count("?") > 1:
+            problemas.append(f"mais de uma pergunta na mesma mensagem: {l[12:120]}")
     fatos = (system + "\n\nAgenda de cada profissional:\n"
              + "\n".join(f"- {p['nome']}: {AG.resumo_semana(p) or 'sem agenda no sistema'}" for p in conf["profissionais"]))
     tk = AG.R.hgetall(CL.K(SLUG, "tokens_teste"))
