@@ -332,3 +332,8 @@ def test_reescrita_que_pede_desculpa_pela_confusao_e_descartada():
 def test_revisao_pega_nesta_semana_sem_data():
     _, probs = CL.revisar_resposta("De manhã ele não tem horário nesta semana. Qual prefere?", date(2026, 11, 23), hora=10)
     assert any("nesta semana" in p for p in probs)
+
+
+def test_revisao_troca_nome_do_cadastro_pelo_de_conversa(conf):
+    t, _ = CL.revisar_resposta("Amanhã tenho com a Dra. Ana Souza às 14h.", conf=conf)
+    assert "Dra. Ana às 14h" in t and "Souza" not in t

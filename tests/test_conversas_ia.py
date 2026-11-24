@@ -143,6 +143,9 @@ def _juiz(fatos: str, conversa: str, esperado: str) -> dict:
     try:
         return json.loads(m.group(0)) if m else {"regra": [f"juiz sem JSON: {txt[:200]}"]}
     except json.JSONDecodeError:
+        # aspas soltas dentro de uma nota de estilo quebram o JSON; se fato e regra estao vazios, a conversa passou
+        if re.search(r'"fato"\s*:\s*\[\s*\]', txt) and re.search(r'"regra"\s*:\s*\[\s*\]', txt):
+            return {"fato": [], "regra": [], "estilo": ["(nota de estilo ilegível)"]}
         return {"regra": [f"juiz com JSON inválido: {txt[:200]}"]}
 
 

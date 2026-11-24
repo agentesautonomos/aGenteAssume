@@ -1020,6 +1020,10 @@ def revisar_resposta(texto: str, hoje=None, conf=None, hora=None) -> tuple:
     texto = _RE_DIA_DATA.sub(corrige_dia, texto)
     certa = saudacao_certa(agora().hour if hora is None else hora)   # cumprimenta pelo relogio, nao pelo paciente
     texto = _RE_SAUDACAO.sub(lambda m: certa[0].upper() + certa[1:] if m.group(1)[0].isupper() else certa, texto)
+    for x in (conf or {}).get("profissionais", []):   # nome do cadastro -> nome de conversa ("Dra. Ana Souza" -> "Dra. Ana")
+        curto = nome_conversa(x.get("nome", ""))
+        if curto and x.get("nome") and curto != x["nome"].strip():
+            texto = re.sub(re.escape(x["nome"].strip()), curto, texto, flags=re.I)
     texto = _RE_DIA_REPETIDO.sub(lambda m: m.group(1) + (m.group(2) or ""), texto)   # "quarta, quarta 25/11" -> "quarta 25/11"
     fala = "\n".join(l for l in texto.split("\n") if not l.strip().startswith("["))
 
@@ -1226,7 +1230,7 @@ def conferir_resposta(etapa: str, msgs: list, agenda: list, rascunho: str, chave
         "[CONFERENTE] Você confere a mensagem que a recepção de uma clínica vai mandar a um paciente no WhatsApp, "
         "antes de ela sair. Aponte só falhas claras; na dúvida, não aponte.\n\n"
         f"CONVERSA ATÉ AGORA:\n{_conversa_txt(msgs, 8)}\n\n"
-        + (f"O QUE A AGENDA RESPONDEU AGORA:\n" + "\n".join(agenda)[:4000] + "\n\n" if agenda else "")
+        + (f"O QUE A AGENDA RESPONDEU AGORA:\n" + "\n".join(agenda)[:12000] + "\n\n" if agenda else "")
         + (f"O QUE ESTA MENSAGEM DEVIA FAZER:{etapa}\n\n" if etapa else "")
         + f"MENSAGEM A CONFERIR:\n{rascunho}\n\n"
         "Confira:\n"
@@ -1235,6 +1239,7 @@ def conferir_resposta(etapa: str, msgs: list, agenda: list, rascunho: str, chave
         "Dia sem atendimento: tem que dizer.)\n"
         "2) A mensagem faz o passo pedido acima, sem pular para outro e sem pedir coisa que o paciente já disse?\n"
         "3) Algum dia, data, hora, profissional ou convênio contradiz o que a agenda respondeu?\n"
+        "Só aponte contradição com a agenda quando a agenda disser o contrário; se a agenda não fala do assunto, não aponte. "
         "Nunca peça para tirar uma informação verdadeira nem a resposta a algo que o paciente disse ou perguntou "
         "(ex.: dizer que um profissional não existe na clínica, que um horário já passou, que não há agenda para alguém).\n"
         "Responda só com JSON: {\"problemas\": [\"...\"]} (lista vazia se está bom). Cada problema em uma frase curta, "
