@@ -327,3 +327,8 @@ def test_revisao_pega_dias_de_atendimento_errados(conf):
 
 def test_reescrita_que_pede_desculpa_pela_confusao_e_descartada():
     assert CL._RE_META.search("Desculpe a confusão. O Dr. Fabio não atende de manhã.")
+
+
+def test_revisao_pega_nesta_semana_sem_data():
+    _, probs = CL.revisar_resposta("De manhã ele não tem horário nesta semana. Qual prefere?", date(2026, 11, 23), hora=10)
+    assert any("nesta semana" in p for p in probs)

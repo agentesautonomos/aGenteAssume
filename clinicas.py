@@ -498,6 +498,9 @@ def montar_prompt(c: dict, conf: dict) -> str:
     p += [
         "",
         "=== COMO CONDUZIR A CONVERSA ===",
+        "Antes de tudo, responda o que o paciente perguntou: se perguntou de um convênio, diga se atende ou não; "
+        "se pediu um horário que já passou, diga que já passou; se pediu um dia sem atendimento, diga isso. "
+        "Só depois ofereça as alternativas.",
         "Faça uma pergunta por vez: cada mensagem sua tem no máximo uma pergunta (um ponto de interrogação) e pede uma coisa só. "
         "Espere a resposta antes de pedir a próxima coisa. Isso vale também para pedidos sem ponto de interrogação: "
         "quando oferecer horários, termine só com \"Qual prefere?\" e deixe nome e convênio para as mensagens seguintes, um de cada vez. "
@@ -942,7 +945,7 @@ _RE_DIA_REPETIDO = re.compile(r"\b(segunda|ter[çc]a|quarta|quinta|sexta|s[áa]b
 _RE_DATA = re.compile(r"\b(\d{1,2})/(\d{1,2})\b")
 _RE_HORA = re.compile(r"\b([01]?\d|2[0-3])(?:h(\d{2})?|:([0-5]\d))(?![\d/])")
 _RE_RELATIVO = re.compile(r"\b(depois de amanh[ãa]|amanh[ãa]|hoje)\b", re.I)
-_RE_SEMANA = re.compile(r"\b(semana que vem|pr[óo]xima semana|esta semana|essa semana)\b", re.I)
+_RE_SEMANA = re.compile(r"\b(semana que vem|pr[óo]xima semana|n?esta semana|n?essa semana)\b", re.I)
 _RE_META = re.compile(r"(pela revis[ãa]o|revis[ãa]o (autom[áa]tica|interna)|nota interna|mensagem anterior|desculp\w* (pela|a) confus[ãa]o|corrigindo|o limite [ée]|a regra de|ferramenta|marcar_consulta|ver_horarios)", re.I)
 _RE_LICENCA = re.compile(r"\b(posso (marcar|agendar|verificar|ver|confirmar|consultar)|quer que eu|deseja que eu|gostaria que eu)\b", re.I)
 
@@ -1035,7 +1038,9 @@ def revisar_resposta(texto: str, hoje=None, conf=None, hora=None) -> tuple:
             ini, fim = (seg + timedelta(days=7), seg + timedelta(days=13)) if "vem" in m.group(1).lower() or "próx" in m.group(1).lower() \
                 else (hoje, seg + timedelta(days=6))
             fora = [d for d in datas if not ini <= d <= fim]
-            if fora:
+            if not datas:
+                problemas.append(f"disse \"{m.group(1)}\" sem data; diga o dia e a data, sem falar de semana")
+            elif fora:
                 problemas.append(f"disse \"{m.group(1)}\" para {fora[0].strftime('%d/%m')}, que não é {m.group(1)} "
                                  f"({ini.strftime('%d/%m')} a {fim.strftime('%d/%m')}); escreva só o dia e a data")
     if conf:
