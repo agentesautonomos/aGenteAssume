@@ -299,7 +299,8 @@ def motivo_sem_horario(slug: str, conf: dict, prof: dict, dia: date, sim: bool =
     if dia < agora.date():
         return "dia que já passou"
     if not intervalos_do_dia(prof, dia.weekday()):
-        return f"{nome} não atende às {DIAS_LONGOS[dia.weekday()].split('-')[0]}s"
+        art = "aos" if dia.weekday() >= 5 else "às"
+        return f"{nome} não atende {art} {DIAS_LONGOS[dia.weekday()].split('-')[0]}s"
     if fecha_no_feriado(conf, dia):
         return f"feriado ({feriado(dia)}), a clínica não atende"
     if dia > agora.date() + timedelta(days=jan):

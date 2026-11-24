@@ -14,6 +14,10 @@ on:
         description: "Modelo do assistente para as conversas (vazio = o mesmo de produção)"
         type: string
         default: ""
+      repeticoes:
+        description: "Quantas vezes rodar cada conversa (a IA varia de uma vez para outra)"
+        type: string
+        default: "1"
 
 jobs:
   regras:
@@ -41,6 +45,7 @@ jobs:
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           CLINICA_MODEL: ${{ inputs.modelo }}
+          REPETIR: ${{ inputs.repeticoes }}
         run: |
           if [ -z "$CLINICA_MODEL" ]; then unset CLINICA_MODEL; fi
           if [ -z "$ANTHROPIC_API_KEY" ]; then

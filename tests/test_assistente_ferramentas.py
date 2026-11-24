@@ -61,7 +61,7 @@ def test_prompt_pede_uma_pergunta_por_vez_e_preferencias(conf):
     from conftest import CLINICA
     txt = CL.montar_prompt(CLINICA, conf)
     assert "uma pergunta por vez" in txt
-    assert "preferência por algum profissional" in txt
+    assert "pergunte se tem preferência por algum" in txt
     assert "final do dia" in txt
 
 
@@ -216,3 +216,124 @@ def test_prompt_profissional_sem_agenda_vira_pedido(conf):
 def test_ferramenta_so_lista_quem_tem_agenda(conf):
     nomes = CL.ferramentas_agenda(conf)[1]["input_schema"]["properties"]["profissional"]["enum"]
     assert nomes == ["Dra. Ana Souza", "Dr. Fabio Lima"]
+
+
+# ---------- a resposta tem que soar como recepcionista, nao como ficha de cadastro ----------
+def test_nome_de_conversa_limpa_o_cadastro():
+    assert CL.nome_conversa("Dr. Marco tonding") == "Dr. Marco"
+    assert CL.nome_conversa("Dr. Fabio Sobrenome") == "Dr. Fabio"
+    assert CL.nome_conversa("dra ana souza") == "Dra. Ana"
+    assert CL.nome_conversa("Carla") == "Carla"
+
+
+def test_prompt_traz_nome_de_conversa_e_pede_para_nao_despejar_cadastro(conf):
+    txt = CL.montar_prompt(CLINICA, conf)
+    assert "Como chamar na conversa: Dra. Ana" in txt
+    assert "Nunca copie dados do cadastro" in txt
+    assert "o que ele precisa" in txt
+
+
+# ---------- datas escritas pelo sistema e revisao automatica da resposta ----------
+def test_horarios_vem_com_o_dia_ja_escrito_e_sugestao_de_3(ferramenta):
+    r = ferramenta("ver_horarios_livres", profissional="Dra. Ana Souza", data_inicial="2026-11-24", dias=1, periodo="tarde")
+    assert "amanhã, terça 24/11 [2026-11-24]" in r
+    sug = [l for l in r.split("\n") if l.startswith("SUGESTÃO PARA OFERECER")][0]
+    assert "amanhã, terça 24/11 às 14h" in sug and "com Dra. Ana" in sug
+    assert len(CL._RE_HORA.findall(sug)) == 3
+
+
+def test_sugestao_sem_profissional_tem_3_no_total(ferramenta):
+    r = ferramenta("ver_horarios_livres", data_inicial="2026-11-24", dias=1, periodo="tarde")
+    sug = [l for l in r.split("\n") if l.startswith("SUGESTÃO PARA OFERECER")]
+    assert len(sug) == 1 and len(CL._RE_HORA.findall(sug[0])) == 3
+    assert "Dra. Ana" in sug[0] and "Dr. Fabio" in sug[0]
+
+
+def test_natal_sugere_proximos_dias_com_data_certa(ferramenta, relogio):
+    relogio.ajustar(datetime(2026, 12, 20, 13, 0, tzinfo=timezone.utc))
+    r = ferramenta("ver_horarios_livres", profissional="Dra. Ana Souza", data_inicial="2026-12-25", dias=1)
+    assert "sexta 25/12: feriado" in r
+    assert "SUGESTÃO PARA OFERECER" in r and "segunda 28/12 às 8h" in r
+
+
+def test_revisao_corrige_dia_da_semana_errado():
+    hoje = date(2026, 11, 23)
+    txt, probs = CL.revisar_resposta("Tenho quarta 26/11 às 9h com a Dra. Ana. Qual prefere?", hoje)
+    assert "quinta 26/11" in txt and probs == []
+
+
+def test_revisao_pega_amanha_e_semana_que_vem_errados():
+    hoje = date(2026, 12, 20)   # domingo
+    _, probs = CL.revisar_resposta("A Dra. Ana tem na semana que vem, segunda 28/12 às 9h. Qual prefere?", hoje)
+    assert any("semana que vem" in p for p in probs)
+    _, probs = CL.revisar_resposta("Tenho amanhã, quarta 23/12, às 9h. Qual prefere?", hoje)
+    assert any("amanhã" in p for p in probs)
+    _, probs = CL.revisar_resposta("Tenho amanhã, segunda 21/12, às 9h. Qual prefere?", hoje)
+    assert probs == []
+
+
+def test_revisao_pega_horarios_demais_perguntas_e_licenca():
+    hoje = date(2026, 11, 23)
+    _, probs = CL.revisar_resposta("Tenho 14h, 15h, 16h ou 17h. Qual prefere?", hoje)
+    assert any("4 horários" in p for p in probs)
+    _, probs = CL.revisar_resposta("Oi, tudo bem? Tem preferência por alguém?", hoje)
+    assert any("mais de uma pergunta" in p for p in probs)
+    _, probs = CL.revisar_resposta("Está livre. Posso marcar para você?", hoje)
+    assert any("licença" in p for p in probs)
+    _, probs = CL.revisar_resposta("Pronto, marquei quinta 26/11 às 17h com a Dra. Ana.\n[AGENDAMENTO: a | b | c (x) | d | e]", hoje)
+    assert probs == []
+
+
+def test_cedo_sugere_os_primeiros_e_fim_do_dia_os_ultimos(ferramenta):
+    r = ferramenta("ver_horarios_livres", profissional="Dra. Ana Souza", data_inicial="2026-11-24", dias=1, periodo="cedo")
+    sug = [l for l in r.split("\n") if l.startswith("SUGESTÃO")][0]
+    assert "8h, 8h30 ou 9h" in sug
+    r = ferramenta("ver_horarios_livres", profissional="Dra. Ana Souza", data_inicial="2026-11-24", dias=1, periodo="fim_do_dia")
+    sug = [l for l in r.split("\n") if l.startswith("SUGESTÃO")][0]
+    assert "16h30, 17h ou 17h30" in sug
+
+
+def test_revisao_tira_dia_repetido():
+    txt, _ = CL.revisar_resposta("Consigo sim! Na quarta, quarta 25/11, a Dra. Ana tem 11h ou 11h30. Qual prefere?", date(2026, 11, 23))
+    assert "Na quarta 25/11" in txt
+
+
+def test_texto_interno_da_revisao_e_reconhecido():
+    assert CL._RE_META.search("Pela revisão, a mensagem anterior ofereceu seis horários, e o limite é três no total.")
+    assert not CL._RE_META.search("Tenho quinta 26/11 às 9h para uma consulta de revisão com a Dra. Ana. Qual prefere?")
+
+
+def test_hoje_explica_que_horario_anterior_ja_passou(ferramenta):
+    r = ferramenta("ver_horarios_livres", profissional="Dra. Ana Souza", dias=1)
+    assert "Agora são 10:00" in r and "já passaram" in r
+
+
+def test_revisao_cumprimenta_pelo_relogio():
+    txt, _ = CL.revisar_resposta("Boa noite! Para aparelho quem atende é o Dr. Fabio.", date(2026, 11, 23), hora=10)
+    assert txt.startswith("Bom dia!")
+
+
+def test_revisao_pega_dias_de_atendimento_errados(conf):
+    hoje = date(2026, 11, 23)
+    _, probs = CL.revisar_resposta("Poxa, o Dr. Fabio não atende às quartas; ele atende de segunda a quinta, à tarde. "
+                                   "Qual prefere?", hoje, conf=conf, hora=10)
+    assert any("quarta" in p and "Dr. Fabio" in p for p in probs)
+    _, probs = CL.revisar_resposta("O Dr. Fabio não atende às quartas; ele atende segunda, terça e quinta à tarde. "
+                                   "Qual prefere?", hoje, conf=conf, hora=10)
+    assert probs == []
+    _, probs = CL.revisar_resposta("A Dra. Ana atende de segunda a sexta. Qual dia fica melhor?", hoje, conf=conf, hora=10)
+    assert probs == []
+
+
+def test_reescrita_que_pede_desculpa_pela_confusao_e_descartada():
+    assert CL._RE_META.search("Desculpe a confusão. O Dr. Fabio não atende de manhã.")
+
+
+def test_revisao_pega_nesta_semana_sem_data():
+    _, probs = CL.revisar_resposta("De manhã ele não tem horário nesta semana. Qual prefere?", date(2026, 11, 23), hora=10)
+    assert any("nesta semana" in p for p in probs)
+
+
+def test_revisao_troca_nome_do_cadastro_pelo_de_conversa(conf):
+    t, _ = CL.revisar_resposta("Amanhã tenho com a Dra. Ana Souza às 14h.", conf=conf)
+    assert "Dra. Ana às 14h" in t and "Souza" not in t
