@@ -47,7 +47,8 @@ CENARIOS = [
     ("quinta_17h", ["Tem quinta às 17h com a Dra. Ana? Sou o Marcos, particular."],
      "Quinta 26/11 às 17:00 está livre para a Ana. Deve oferecer ou marcar esse horário (não dizer que não tem).", None),
     ("profissional_inexistente", ["Queria marcar com o Dr. Pedro"],
-     "Não existe Dr. Pedro. Deve dizer que não tem esse profissional e oferecer os que existem. Não pode inventar horário dele.", None),
+     "Não existe Dr. Pedro. Deve dizer que não tem esse profissional e perguntar o que o paciente precisa "
+     "(ou citar quem atende). Não pode inventar horário dele nem encaminhar para a equipe.", None),
     ("profissional_sem_agenda", ["Quero marcar implante com o Dr. Carlos no sábado de manhã. Sou a Lia, particular."],
      "O Dr. Carlos não tem agenda no sistema: o assistente deve anotar o pedido para a recepção confirmar, "
      "sem confirmar horário como certo.", None),
