@@ -296,3 +296,13 @@ def test_cedo_sugere_os_primeiros_e_fim_do_dia_os_ultimos(ferramenta):
 def test_revisao_tira_dia_repetido():
     txt, _ = CL.revisar_resposta("Consigo sim! Na quarta, quarta 25/11, a Dra. Ana tem 11h ou 11h30. Qual prefere?", date(2026, 11, 23))
     assert "Na quarta 25/11" in txt
+
+
+def test_texto_interno_da_revisao_e_reconhecido():
+    assert CL._RE_META.search("Pela revisão, a mensagem anterior ofereceu seis horários, e o limite é três no total.")
+    assert not CL._RE_META.search("Tenho quinta 26/11 às 9h para uma consulta de revisão com a Dra. Ana. Qual prefere?")
+
+
+def test_hoje_explica_que_horario_anterior_ja_passou(ferramenta):
+    r = ferramenta("ver_horarios_livres", profissional="Dra. Ana Souza", dias=1)
+    assert "Agora são 10:00" in r and "já passaram" in r

@@ -896,6 +896,9 @@ def executar_ferramenta(nome: str, ent: dict, ctx: dict) -> str:
         faltam = [d for d in faltam if d not in res and AG.intervalos_do_dia(prof, d.weekday())]
         if faltam:
             linhas.append("Sem horário (dias em que atende): " + _txt_motivos(_motivos(slug, conf, prof, faltam, sim)))
+        if ini == hoje:
+            linhas.append(f"Agora são {agora().strftime('%H:%M')}: horários de hoje antes disso já passaram "
+                          "(não estão ocupados, só passaram). Se o paciente pediu um horário de hoje que já passou, diga isso.")
         if "_achados" in ctx:
             ctx["_achados"].append((prof, achados))
         linhas.append(sugestao_txt([(prof, achados)], periodo=ent.get("periodo") or ""))
@@ -936,6 +939,7 @@ _RE_DATA = re.compile(r"\b(\d{1,2})/(\d{1,2})\b")
 _RE_HORA = re.compile(r"\b([01]?\d|2[0-3])(?:h(\d{2})?|:([0-5]\d))(?![\d/])")
 _RE_RELATIVO = re.compile(r"\b(depois de amanh[ãa]|amanh[ãa]|hoje)\b", re.I)
 _RE_SEMANA = re.compile(r"\b(semana que vem|pr[óo]xima semana|esta semana|essa semana)\b", re.I)
+_RE_META = re.compile(r"(pela revis[ãa]o|revis[ãa]o (autom[áa]tica|interna)|nota interna|mensagem anterior|o limite [ée]|a regra de|ferramenta|marcar_consulta|ver_horarios)", re.I)
 _RE_LICENCA = re.compile(r"\b(posso (marcar|agendar|verificar|ver|confirmar|consultar)|quer que eu|deseja que eu|gostaria que eu)\b", re.I)
 
 
@@ -1004,7 +1008,7 @@ async def conversar_ia(system: str, msgs: list, ctx: dict, chave_tokens: str) ->
     """Chama a IA com as ferramentas da agenda (se a clinica tiver agenda) e devolve o texto final."""
     tools = ferramentas_agenda(ctx["conf"])
     msgs = list(msgs)
-    textos, revisoes = [], 0
+    textos, revisoes, rascunho = [], 0, ""
     for _ in range(8):
         kw = {"tools": tools} if tools else {}
         if _MODELO_NOVO:
@@ -1021,17 +1025,23 @@ async def conversar_ia(system: str, msgs: list, ctx: dict, chave_tokens: str) ->
         usos = [b for b in resp.content if getattr(b, "type", "") == "tool_use"]
         if resp.stop_reason != "tool_use" or not usos:
             final = texto or "\n".join(textos)
+            if revisoes and (_RE_META.search(final) or not final):
+                # a reescrita falou do sistema em vez de falar com o paciente: fica com o rascunho anterior
+                print(f"CLINICA {ctx['slug']} reescrita descartada: {final[:120]!r}")
+                return rascunho
             final, problemas = revisar_resposta(final)
+            rascunho = final
             if problemas and revisoes < 2 and final:
                 revisoes += 1
                 print(f"CLINICA {ctx['slug']} revisao {revisoes}: {problemas}")
                 ctx.setdefault("revisoes", []).append(problemas)
                 msgs.append({"role": "assistant", "content": resp.content and [_bloco_para_param(b) for b in resp.content] or final})
-                msgs.append({"role": "user", "content": "[revisão interna, o paciente não vê isto] Sua última mensagem não pode ser "
+                msgs.append({"role": "user", "content": "[nota interna do sistema, o paciente não vê isto] Sua última mensagem não pode ser "
                              "enviada assim: " + "; ".join(problemas) + ". Corrija: se o paciente já deu o horário, o nome e se é particular ou "
                              "convênio, chame marcar_consulta agora e confirme; se precisar, consulte a agenda de novo. Depois escreva "
                              "a mensagem inteira para o paciente, corrigida, mantendo o que estava certo (e as linhas "
-                             "[AGENDAMENTO]/[ENCAMINHAR], se houver)."})
+                             "[AGENDAMENTO]/[ENCAMINHAR], se houver). Responda só com a mensagem para o paciente: não comente esta nota, "
+                             "não fale de regras, revisão nem limite."})
                 textos = []
                 continue
             return final
