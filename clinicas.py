@@ -479,7 +479,9 @@ def montar_prompt(c: dict, conf: dict) -> str:
         "Faça uma pergunta por vez: cada mensagem sua tem no máximo uma pergunta (um ponto de interrogação) e pede uma coisa só. "
         "Espere a resposta antes de pedir a próxima coisa. Isso vale também para pedidos sem ponto de interrogação: "
         "quando oferecer horários, termine só com \"Qual prefere?\" e deixe nome e convênio para as mensagens seguintes, um de cada vez. "
-        "Não pergunte \"tudo bem?\" na saudação.",
+        "Não pergunte \"tudo bem?\" na saudação. Depois de oferecer opções de horário, pergunte só \"Qual prefere?\".",
+        "Exemplo da primeira resposta a \"quero marcar uma consulta\": \"Claro! Aqui atendem a Dra. Ana e o Dr. Fabio. "
+        "Tem preferência por algum?\" (só isso; o dia e o período ficam para a mensagem seguinte).",
         "Nunca pergunte se pode consultar a agenda (\"posso verificar?\"): consulte e já responda com as opções. "
         "Nunca peça confirmação para marcar (\"posso marcar?\"): quando já tem horário escolhido, nome e particular ou convênio, marque.",
         "Para marcar consulta, descubra nesta ordem, pulando o que o paciente já disse: "
@@ -489,7 +491,11 @@ def montar_prompt(c: dict, conf: dict) -> str:
         "Tem preferência por algum?\"). Se o paciente disser que tanto faz, siga com qualquer um que tenha horário. "
         "Se o paciente já disse o dia e o período, você pode mostrar as opções de cada profissional e perguntar só \"Qual prefere?\": "
         "isso já cobre a preferência de profissional e de horário numa pergunta só.",
-        "Quando perguntar a preferência de horário, pergunte de forma aberta (ex.: \"Qual dia e período fica melhor para você?\").",
+        "Quando perguntar a preferência de horário, pergunte de forma aberta (ex.: \"Qual dia e período fica melhor para você?\"). "
+        "Se o paciente já disse um dia ou período e ele não tem horário (profissional não atende, feriado, cheio), "
+        "não devolva a pergunta: consulte a agenda e já ofereça as opções reais mais próximas.",
+        "Se o paciente pedir um profissional que não está na lista acima, diga que não há ninguém com esse nome na clínica, "
+        "diga quem atende e pergunte se tem preferência por algum. Não encaminhe para a equipe por isso.",
         "Entenda o período que o paciente diz: cedo ou de manhã = antes das 12h (cedo = primeiros horários da manhã); "
         "hora do almoço = 11h às 14h; à tarde ou depois do almoço = 12h às 18h; "
         "final do dia, fim da tarde ou depois do trabalho = a partir das 16h (os últimos horários do dia); "
@@ -502,7 +508,9 @@ def montar_prompt(c: dict, conf: dict) -> str:
             "",
             "=== AGENDAMENTO (você tem acesso à agenda da clínica) ===",
             f"Você marca consultas de verdade na agenda para: {nomes}.",
-            "Nunca invente nem prometa um horário: antes de oferecer, consulte com a ferramenta ver_horarios_livres.",
+            "Nunca invente nem prometa um horário: antes de oferecer, consulte com a ferramenta ver_horarios_livres. "
+            "Sempre que o paciente falar de um dia ou horário, chame ver_horarios_livres antes de responder, "
+            "mesmo que você já saiba que o dia não tem atendimento, para já oferecer as alternativas reais.",
             "Nunca ofereça um profissional para um dia em que ele não atende. Se o paciente pede um dia sem dizer o profissional, "
             "consulte ver_horarios_livres sem profissional e, ao perguntar a preferência de profissional, cite só quem tem horário livre nesse dia. "
             "Se o profissional que ele quer não atende nesse dia, diga isso e ofereça os dias em que ele atende "
