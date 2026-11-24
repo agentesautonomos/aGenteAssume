@@ -36,7 +36,8 @@ CENARIOS = [
      "(seg, ter ou qui à tarde) ou a Dra. Ana na quarta. Não pode oferecer o Fabio na quarta.", None),
     ("amanha_a_tarde", ["Boa tarde! Vocês têm horário amanhã à tarde?"],
      "Amanhã é terça 24/11 e à tarde atendem a Dra. Ana e o Dr. Fabio. Deve perguntar se o paciente tem preferência "
-     "de profissional, citando os dois (pode já mostrar horários livres de verdade da tarde de 24/11). Uma pergunta só.", None),
+     "de profissional citando os dois, ou mostrar horários livres de verdade da tarde de 24/11 de cada um e perguntar só "
+     "qual prefere. Uma pergunta só.", None),
     ("dia_25_marca", ["Oi, meu nome é Joana Prado. Queria dia 25 às 15h com a Dra. Ana, particular."],
      "Dia 25 é quarta 25/11. 15:00 está livre para a Ana. Deve marcar e confirmar quarta 25/11 às 15h com a Dra. Ana.", None),
     ("semana_que_vem_quinta", ["Quero marcar com o Dr. Fabio na quinta da semana que vem, meu nome é Rui, particular"],
@@ -101,7 +102,8 @@ def _juiz(fatos: str, conversa: str, esperado: str) -> dict:
         f"FATOS VERDADEIROS (agenda, data de hoje, regras):\n{fatos}\n\n"
         f"O QUE SE ESPERA NESTE CENÁRIO:\n{esperado}\n\n"
         f"CONVERSA (com as consultas feitas à agenda):\n{conversa}\n\n"
-        "REGRAS DE CONVERSA: no máximo uma pergunta por mensagem; para marcar, perguntar a preferência de profissional "
+        "REGRAS DE CONVERSA: no máximo uma pergunta por mensagem (mostrar as opções de cada profissional e perguntar só "
+        "'qual prefere?' conta como uma pergunta só e cobre a preferência de profissional); para marcar, perguntar a preferência de profissional "
         "(se o paciente não disse) e a preferência de dia/período (se não disse) antes de pedir nome ou convênio; "
         "oferecer só horários dentro do período pedido (manhã/cedo antes das 12h, almoço 11h-14h, tarde 12h-18h, "
         "final do dia/fim da tarde/depois do trabalho a partir das 16h, noite a partir das 18h).\n\n"

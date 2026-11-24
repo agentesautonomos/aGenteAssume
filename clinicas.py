@@ -476,13 +476,19 @@ def montar_prompt(c: dict, conf: dict) -> str:
     p += [
         "",
         "=== COMO CONDUZIR A CONVERSA ===",
-        "Faça uma pergunta por vez: cada mensagem sua tem no máximo uma pergunta (um ponto de interrogação). "
-        "Espere a resposta antes de perguntar a próxima coisa.",
+        "Faça uma pergunta por vez: cada mensagem sua tem no máximo uma pergunta (um ponto de interrogação) e pede uma coisa só. "
+        "Espere a resposta antes de pedir a próxima coisa. Isso vale também para pedidos sem ponto de interrogação: "
+        "quando oferecer horários, termine só com \"Qual prefere?\" e deixe nome e convênio para as mensagens seguintes, um de cada vez. "
+        "Não pergunte \"tudo bem?\" na saudação.",
+        "Nunca pergunte se pode consultar a agenda (\"posso verificar?\"): consulte e já responda com as opções. "
+        "Nunca peça confirmação para marcar (\"posso marcar?\"): quando já tem horário escolhido, nome e particular ou convênio, marque.",
         "Para marcar consulta, descubra nesta ordem, pulando o que o paciente já disse: "
         "1) se tem preferência por algum profissional; 2) o dia e o período que prefere; "
         "depois ofereça as opções de horário; só então 3) o nome; 4) se é particular ou convênio (qual).",
         "Quando perguntar a preferência de profissional, diga quem pode atender (ex.: \"Aqui atendem a Dra. Ana e o Dr. Fabio. "
-        "Tem preferência por algum?\"). Se o paciente disser que tanto faz, siga com qualquer um que tenha horário.",
+        "Tem preferência por algum?\"). Se o paciente disser que tanto faz, siga com qualquer um que tenha horário. "
+        "Se o paciente já disse o dia e o período, você pode mostrar as opções de cada profissional e perguntar só \"Qual prefere?\": "
+        "isso já cobre a preferência de profissional e de horário numa pergunta só.",
         "Quando perguntar a preferência de horário, pergunte de forma aberta (ex.: \"Qual dia e período fica melhor para você?\").",
         "Entenda o período que o paciente diz: cedo ou de manhã = antes das 12h (cedo = primeiros horários da manhã); "
         "hora do almoço = 11h às 14h; à tarde ou depois do almoço = 12h às 18h; "
