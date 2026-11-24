@@ -337,3 +337,22 @@ def test_revisao_pega_nesta_semana_sem_data():
 def test_revisao_troca_nome_do_cadastro_pelo_de_conversa(conf):
     t, _ = CL.revisar_resposta("Amanhã tenho com a Dra. Ana Souza às 14h.", conf=conf)
     assert "Dra. Ana às 14h" in t and "Souza" not in t
+
+
+def test_revisao_pede_data_junto_de_hoje_com_horario():
+    _, p = CL.revisar_resposta("Para hoje, a Dra. Ana tem às 14h ou 16h.")
+    assert any("sem a data" in x for x in p)
+    _, p = CL.revisar_resposta("Hoje, segunda 23/11, a Dra. Ana tem às 14h ou 16h.")
+    assert not any("sem a data" in x for x in p)
+
+
+def test_encaminhar_sem_pergunta_e_com_aviso_de_que_a_equipe_continua():
+    t, p = CL.revisar_resposta("Não tenho o valor aqui, vou passar para a equipe.\n[ENCAMINHAR: preço]")
+    assert "por aqui" in t and t.rstrip().endswith("[ENCAMINHAR: preço]") and not p
+    _, p = CL.revisar_resposta("Vou passar para a equipe por aqui. Tem preferência de data?\n[ENCAMINHAR: preço]")
+    assert any("não faça perguntas" in x for x in p)
+
+
+def test_etapa_com_um_profissional_so_nao_pergunta_preferencia(conf):
+    e = CL.proxima_etapa({"motivo": "dor de dente"}, conf)
+    assert "se for só um, não pergunte preferência" in e

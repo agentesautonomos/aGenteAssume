@@ -587,7 +587,8 @@ def montar_prompt(c: dict, conf: dict) -> str:
             "Remarcar: use consultas_do_paciente para achar a consulta (se houver mais de uma, pergunte qual), "
             "pergunte o dia e período que prefere, consulte ver_horarios_livres, ofereça as opções e, quando ele escolher, "
             "chame remarcar_consulta e confirme o novo dia, data, hora e profissional. Não peça nome nem convênio de novo.",
-            "Cancelar: use consultas_do_paciente, confirme qual consulta é (dia e hora) se não estiver claro, chame "
+            "Cancelar: use consultas_do_paciente; se só uma consulta bate com o que o paciente disse, cancele direto, sem pedir "
+            "confirmação; se houver mais de uma, pergunte qual (dia e hora). Chame "
             "cancelar_consulta e confirme o cancelamento; depois ofereça remarcar para outro dia, sem insistir.",
             f"Pelo WhatsApp só dá para remarcar ou cancelar até {AG.antecedencia_mudar(conf)} horas antes da consulta. "
             "Se faltar menos, diga isso com gentileza e passe para a equipe.",
@@ -1138,6 +1139,18 @@ def revisar_resposta(texto: str, hoje=None, conf=None, hora=None) -> tuple:
         problemas.append("copiou dados do cadastro (parênteses ou 'Sobrenome'); escreva como numa conversa")
     if _RE_LICENCA.search(fala):
         problemas.append("pediu licença ou confirmação (\"posso...\", \"quer que eu...\"); faça direto: consulte, ofereça ou marque")
+    for frase in re.split(r"(?<!Dr\.)(?<!Dra\.)(?<=[.!?])\s+|\n", fala):
+        if _RE_HORA.search(frase) and re.search(r"\b(hoje|amanh[ãa])\b", frase, re.I) and not _RE_DATA.search(frase):
+            problemas.append("ofereceu horário de hoje/amanhã sem a data; escreva o dia como a agenda escreve (ex.: hoje, segunda 23/11)")
+            break
+    if RE_ENC.search(texto):
+        if "?" in fala:
+            problemas.append("ao passar para a equipe, não faça perguntas nem siga o atendimento: só avise que a equipe continua")
+        if not re.search(r"\bpor aqui\b", fala, re.I):
+            # aviso obrigatorio ao encaminhar: entra sozinho, antes da linha [ENCAMINHAR]
+            m = RE_ENC.search(texto)
+            texto = (texto[:m.start()].rstrip() + "\nAlguém da equipe continua a conversa com você por aqui.\n"
+                     + texto[m.start():])
     return texto, problemas
 
 
@@ -1152,9 +1165,10 @@ CONFERENTE_LIGADO = os.environ.get("CLINICA_CONFERENTE", "1") != "0"
 # (campo, o que e, o que pedir)
 ETAPAS = [
     ("motivo", "o que o paciente precisa",
-     "pergunte o que ele precisa, de forma aberta (ex.: \"Claro! Me conta, é para quê?\")"),
+     "pergunte o que ele precisa, de forma aberta (ex.: \"Claro! Me conta, é para quê?\"); não ofereça horários nesta mensagem"),
     ("profissional", "o profissional",
-     "diga quem atende o caso dele (pelo nome de conversa, só quem a especialidade cobre) e pergunte se tem preferência"),
+     "diga quem atende o caso dele (pelo nome de conversa, só quem a especialidade cobre); se for mais de um, pergunte se tem "
+     "preferência; se for só um, não pergunte preferência: diga quem é e pergunte qual dia e período fica melhor"),
     ("quando", "o dia e o período",
      "pergunte qual dia e período fica melhor para ele"),
     ("horario", "o horário",
