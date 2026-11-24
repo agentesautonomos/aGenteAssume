@@ -1057,11 +1057,178 @@ def revisar_resposta(texto: str, hoje=None, conf=None, hora=None) -> tuple:
     return texto, problemas
 
 
+# ============================================================
+# ETAPAS DA CONVERSA E CONFERENTE
+# O sistema decide qual e o proximo dado que falta (uma coisa por vez, sempre na mesma ordem)
+# e uma segunda IA, barata, confere a resposta antes de ela sair.
+# ============================================================
+MODELO_CONFERENTE = os.environ.get("CLINICA_MODELO_CONFERENTE", "claude-haiku-5-5")
+CONFERENTE_LIGADO = os.environ.get("CLINICA_CONFERENTE", "1") != "0"
+
+# (campo, o que e, o que pedir)
+ETAPAS = [
+    ("motivo", "o que o paciente precisa",
+     "pergunte o que ele precisa, de forma aberta (ex.: \"Claro! Me conta, é para quê?\")"),
+    ("profissional", "o profissional",
+     "diga quem atende o caso dele (pelo nome de conversa, só quem a especialidade cobre) e pergunte se tem preferência"),
+    ("quando", "o dia e o período",
+     "pergunte qual dia e período fica melhor para ele"),
+    ("horario", "o horário",
+     "consulte a agenda (ver_horarios_livres) e ofereça até 3 opções concretas, com dia, data e hora; pergunte qual prefere"),
+    ("nome", "o nome do paciente",
+     "pergunte o nome completo dele"),
+    ("convenio", "particular ou convênio",
+     "pergunte se é particular ou por convênio (e qual)"),
+]
+
+
+def _texto_msg(m: dict) -> str:
+    c = m.get("content")
+    if isinstance(c, str):
+        return c
+    return " ".join(b.get("text", "") for b in c if isinstance(b, dict) and b.get("type") == "text")
+
+
+def _json_de(txt: str) -> dict:
+    m = re.search(r"\{.*\}", txt or "", re.S)
+    if not m:
+        return {}
+    try:
+        v = json.loads(m.group(0))
+        return v if isinstance(v, dict) else {}
+    except ValueError:
+        return {}
+
+
+def _ia_aux(pedido: str, chave_tokens: str, max_tokens: int = 400) -> dict:
+    kw = {"extra_body": {"thinking": {"type": "disabled"}}} if re.match(r"claude-(haiku|sonnet|opus)-5", MODELO_CONFERENTE) else {}
+    resp = claude().messages.create(model=MODELO_CONFERENTE, max_tokens=max_tokens, temperature=0,
+                                    messages=[{"role": "user", "content": pedido}], **kw)
+    try:
+        R.hincrby(chave_tokens, "aux_entrada", resp.usage.input_tokens)
+        R.hincrby(chave_tokens, "aux_saida", resp.usage.output_tokens)
+    except Exception:
+        pass
+    return _json_de("".join(getattr(b, "text", "") for b in resp.content))
+
+
+def _conversa_txt(msgs: list, n: int = 14) -> str:
+    linhas = []
+    for m in msgs[-n:]:
+        t = _texto_msg(m).strip()
+        if t:
+            linhas.append(("Paciente: " if m["role"] == "user" else "Clínica: ") + t)
+    return "\n".join(linhas)
+
+
+def ler_estado(msgs: list, conf: dict, chave_tokens: str) -> dict:
+    """Le a conversa e diz o que o paciente ja informou e o que perguntou na ultima mensagem."""
+    profs = ", ".join(x["nome"] for x in conf.get("profissionais", []))
+    pedido = (
+        "[ETAPAS] Você lê uma conversa de WhatsApp entre um paciente e a recepção de uma clínica e anota o que o paciente "
+        f"já informou para marcar uma consulta. Profissionais da clínica: {profs or '-'}.\n\n"
+        f"CONVERSA:\n{_conversa_txt(msgs)}\n\n"
+        "Responda só com JSON, assim:\n"
+        '{"motivo": "...", "profissional": "...", "quando": "...", "horario": "...", "nome": "...", "convenio": "...", '
+        '"perguntas": ["..."], "fora_do_agendamento": false, "ja_marcado": false}\n'
+        "- Use null no que o paciente ainda não disse. Só anote o que o PACIENTE disse ou aceitou, não o que a clínica ofereceu.\n"
+        "- motivo: o que ele precisa (dor, limpeza, aparelho...). profissional: o nome que ele escolheu, ou \"tanto faz\".\n"
+        "- quando: o dia e/ou período que ele prefere (ex.: \"amanhã à tarde\", \"quinta\", \"qualquer dia\").\n"
+        "- horario: só se ele escolheu ou pediu um horário exato (ex.: \"14h\").\n"
+        "- convenio: \"particular\" ou o nome do convênio que ele disse que vai usar.\n"
+        "- perguntas: o que a ÚLTIMA mensagem do paciente pergunta ou pede que precisa de resposta direta "
+        "(ex.: \"atende Amil?\", \"tem às 9h hoje?\", \"quanto custa?\"). Lista vazia se não perguntou nada.\n"
+        "- fora_do_agendamento: true se ele quer outra coisa que não marcar consulta (remarcar, cancelar, falar com uma pessoa, "
+        "urgência, reclamação, só uma informação).\n"
+        "- ja_marcado: true se a clínica já confirmou a consulta marcada nesta conversa e ele não pediu outra.")
+    return _ia_aux(pedido, chave_tokens)
+
+
+def _tem(v) -> bool:
+    return bool(v) and str(v).strip().lower() not in ("null", "none", "-", "")
+
+
+def proxima_etapa(estado: dict, conf: dict) -> str:
+    """Decide o que esta resposta deve fazer. Devolve o texto que vai para a IA (vazio se nao ha o que dirigir)."""
+    if not estado:
+        return ""
+    com_agenda = AG.profs_com_agenda(conf)
+    profs = conf.get("profissionais", [])
+    perguntas = [str(x).strip() for x in (estado.get("perguntas") or []) if str(x).strip()]
+    linhas = []
+    if perguntas:
+        linhas.append("1) Antes de tudo, responda com clareza o que o paciente perguntou: " + "; ".join(perguntas)
+                      + ". (Se é convênio que não é aceito, diga que não atende; se é horário que já passou, diga que já passou; "
+                      "se é dia sem atendimento, diga isso.)")
+    if estado.get("fora_do_agendamento") or estado.get("ja_marcado"):
+        if not linhas:
+            return ""
+        return "\n\nETAPA DESTA RESPOSTA (decidida pelo sistema):\n" + linhas[0]
+    falta = None
+    for campo, _, pedir in ETAPAS:
+        if campo in ("motivo", "profissional") and len(profs) <= 1:
+            continue
+        if campo == "motivo" and _tem(estado.get("profissional")):
+            continue
+        if campo == "horario" and not com_agenda:
+            continue
+        if not _tem(estado.get(campo)):
+            falta = (campo, pedir)
+            break
+    n = len(linhas) + 1
+    if falta is None:
+        if com_agenda:
+            linhas.append(f"{n}) O paciente já deu tudo: chame marcar_consulta agora (se o horário estiver livre) e confirme "
+                          "dia, data, hora, profissional e endereço. Não pergunte mais nada.")
+        else:
+            linhas.append(f"{n}) O paciente já deu tudo: diga que vai passar o pedido para a recepção confirmar o horário "
+                          "e inclua a linha [AGENDAMENTO: ...].")
+    else:
+        campo, pedir = falta
+        if campo == "profissional" and _tem(estado.get("quando")) and com_agenda:
+            pedir = ("consulte a agenda no dia e período que ele pediu e ofereça até 3 horários no total entre os profissionais "
+                     "que atendem o caso dele; pergunte só \"Qual prefere?\"")
+        linhas.append(f"{n}) Depois, {pedir}. Esta é a única pergunta da mensagem: não peça mais nada.")
+    ja = [f"{rot}: {estado[c]}" for c, rot, _ in ETAPAS if _tem(estado.get(c))]
+    return ("\n\nETAPA DESTA RESPOSTA (decidida pelo sistema; siga):\n" + "\n".join(linhas)
+            + ("\nO paciente já informou: " + "; ".join(ja) + ". Não pergunte isso de novo." if ja else ""))
+
+
+def conferir_resposta(etapa: str, msgs: list, agenda: list, rascunho: str, chave_tokens: str) -> list:
+    """Segunda IA, barata: confere se a resposta faz o que a etapa pediu e nao contradiz a agenda."""
+    pedido = (
+        "[CONFERENTE] Você confere a mensagem que a recepção de uma clínica vai mandar a um paciente no WhatsApp, "
+        "antes de ela sair. Aponte só falhas claras; na dúvida, não aponte.\n\n"
+        f"CONVERSA ATÉ AGORA:\n{_conversa_txt(msgs, 8)}\n\n"
+        + (f"O QUE A AGENDA RESPONDEU AGORA:\n" + "\n".join(agenda)[:4000] + "\n\n" if agenda else "")
+        + (f"O QUE ESTA MENSAGEM DEVIA FAZER:{etapa}\n\n" if etapa else "")
+        + f"MENSAGEM A CONFERIR:\n{rascunho}\n\n"
+        "Confira:\n"
+        "1) Se o paciente perguntou algo na última mensagem (um convênio, um horário, um dia), a mensagem responde isso com clareza? "
+        "(Convênio não aceito: tem que dizer que não atende. Horário que já passou: tem que dizer que já passou. "
+        "Dia sem atendimento: tem que dizer.)\n"
+        "2) A mensagem faz o passo pedido acima, sem pular para outro e sem pedir coisa que o paciente já disse?\n"
+        "3) Algum dia, data, hora, profissional ou convênio contradiz o que a agenda respondeu?\n"
+        "Responda só com JSON: {\"problemas\": [\"...\"]} (lista vazia se está bom). Cada problema em uma frase curta, "
+        "dizendo o que corrigir.")
+    v = _ia_aux(pedido, chave_tokens, 300)
+    return [str(x) for x in (v.get("problemas") or []) if str(x).strip()]
+
+
 async def conversar_ia(system: str, msgs: list, ctx: dict, chave_tokens: str) -> str:
     """Chama a IA com as ferramentas da agenda (se a clinica tiver agenda) e devolve o texto final."""
     tools = ferramentas_agenda(ctx["conf"])
-    msgs = list(msgs)
-    textos, revisoes, rascunho = [], 0, ""
+    msgs_orig, msgs = msgs, list(msgs)
+    textos, revisoes, rascunho, agenda = [], 0, "", []
+    etapa = ""
+    if CONFERENTE_LIGADO:
+        try:
+            ctx["estado"] = await asyncio.to_thread(ler_estado, msgs, ctx["conf"], chave_tokens)
+            etapa = proxima_etapa(ctx["estado"], ctx["conf"])
+        except Exception as e:
+            print(f"CLINICA {ctx['slug']} etapas erro: {e}")
+    ctx["etapa"] = etapa
+    system = system + etapa
     for _ in range(8):
         kw = {"tools": tools} if tools else {}
         if _MODELO_NOVO:
@@ -1084,6 +1251,11 @@ async def conversar_ia(system: str, msgs: list, ctx: dict, chave_tokens: str) ->
                 return rascunho
             final, problemas = revisar_resposta(final, conf=ctx.get("conf"))
             rascunho = final
+            if not problemas and CONFERENTE_LIGADO and revisoes < 2 and final:
+                try:
+                    problemas = await asyncio.to_thread(conferir_resposta, etapa, msgs_orig, agenda, final, chave_tokens)
+                except Exception as e:
+                    print(f"CLINICA {ctx['slug']} conferente erro: {e}")
             if problemas and revisoes < 2 and final:
                 revisoes += 1
                 print(f"CLINICA {ctx['slug']} revisao {revisoes}: {problemas}")
@@ -1109,6 +1281,7 @@ async def conversar_ia(system: str, msgs: list, ctx: dict, chave_tokens: str) ->
             except Exception as e:
                 print(f"CLINICA {ctx['slug']} ferramenta {b.name} erro: {e}")
                 out = "Erro ao consultar a agenda agora. Diga ao paciente que a equipe vai confirmar o horário e encaminhe."
+            agenda.append(f"{b.name}({json.dumps(b.input or {}, ensure_ascii=False)}) -> {out}")
             resultados.append({"type": "tool_result", "tool_use_id": b.id, "content": out})
         msgs.append({"role": "user", "content": resultados})
     return "\n".join(textos)

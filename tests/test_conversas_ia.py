@@ -251,6 +251,10 @@ def test_conversa(nome, mensagens, esperado, instante, conf, relogio, monkeypatc
     AG.R.delete(CL.K(SLUG, "tokens_teste"))
     preco = PRECOS.get(CL.MODELO, (0, 0))
     custo = (ent * preco[0] + sai * preco[1]) / 1e6
+    pa = PRECOS.get(CL.MODELO_CONFERENTE, (0, 0))    # etapas + conferente (IA barata)
+    aux_ent, aux_sai = int(tk.get("aux_entrada", 0)), int(tk.get("aux_saida", 0))
+    custo += (aux_ent * pa[0] + aux_sai * pa[1]) / 1e6
+    ent, sai = ent + aux_ent, sai + aux_sai
     _registrar_custo(nome, ent, sai, custo)
     veredito = _juiz(fatos, conversa, esperado)
     erros_fato = [f"FATO: {x}" for x in veredito.get("fato", [])] + [f"FATO: {x}" for x in problemas if x.startswith("consulta inválida")]
