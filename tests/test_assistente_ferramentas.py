@@ -61,7 +61,7 @@ def test_prompt_pede_uma_pergunta_por_vez_e_preferencias(conf):
     from conftest import CLINICA
     txt = CL.montar_prompt(CLINICA, conf)
     assert "uma pergunta por vez" in txt
-    assert "preferência por algum profissional" in txt
+    assert "pergunte se tem preferência por algum" in txt
     assert "final do dia" in txt
 
 
@@ -216,3 +216,18 @@ def test_prompt_profissional_sem_agenda_vira_pedido(conf):
 def test_ferramenta_so_lista_quem_tem_agenda(conf):
     nomes = CL.ferramentas_agenda(conf)[1]["input_schema"]["properties"]["profissional"]["enum"]
     assert nomes == ["Dra. Ana Souza", "Dr. Fabio Lima"]
+
+
+# ---------- a resposta tem que soar como recepcionista, nao como ficha de cadastro ----------
+def test_nome_de_conversa_limpa_o_cadastro():
+    assert CL.nome_conversa("Dr. Marco tonding") == "Dr. Marco"
+    assert CL.nome_conversa("Dr. Fabio Sobrenome") == "Dr. Fabio"
+    assert CL.nome_conversa("dra ana souza") == "Dra. Ana"
+    assert CL.nome_conversa("Carla") == "Carla"
+
+
+def test_prompt_traz_nome_de_conversa_e_pede_para_nao_despejar_cadastro(conf):
+    txt = CL.montar_prompt(CLINICA, conf)
+    assert "Como chamar na conversa: Dra. Ana" in txt
+    assert "Nunca copie dados do cadastro" in txt
+    assert "o que ele precisa" in txt

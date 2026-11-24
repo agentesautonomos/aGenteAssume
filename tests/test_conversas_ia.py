@@ -35,8 +35,8 @@ CENARIOS = [
      "O Dr. Fabio não atende quarta nem de manhã. O assistente deve dizer isso e oferecer dias/horários reais dele "
      "(seg, ter ou qui à tarde) ou a Dra. Ana na quarta. Não pode oferecer o Fabio na quarta.", None),
     ("amanha_a_tarde", ["Boa tarde! Vocês têm horário amanhã à tarde?"],
-     "Amanhã é terça 24/11 e à tarde atendem a Dra. Ana e o Dr. Fabio. Deve perguntar se o paciente tem preferência "
-     "de profissional citando os dois, ou mostrar horários livres de verdade da tarde de 24/11 de cada um e perguntar só "
+     "Amanhã é terça 24/11 e à tarde atendem a Dra. Ana (clínico geral, clareamento) e o Dr. Fabio (ortodontia). "
+     "Pode perguntar para quê é a consulta, ou mostrar horários livres de verdade da tarde de 24/11 de cada um e perguntar só "
      "qual prefere. Uma pergunta só.", None),
     ("dia_25_marca", ["Oi, meu nome é Joana Prado. Queria dia 25 às 15h com a Dra. Ana, particular."],
      "Dia 25 é quarta 25/11. 15:00 está livre para a Ana. Deve marcar e confirmar quarta 25/11 às 15h com a Dra. Ana.", None),
@@ -60,11 +60,18 @@ CENARIOS = [
      "Agora é 20/12. 25/12 é Natal, a clínica não atende. Deve dizer isso e oferecer outro dia real.",
      datetime(2026, 12, 20, 13, 0, tzinfo=timezone.utc)),
     # regras de conversa: preferência de profissional, preferência de horário, uma pergunta por vez
-    ("quero_marcar_passo_a_passo", ["Oi, queria marcar uma consulta", "Tanto faz", "Pode ser amanhã no final do dia"],
-     "Na 1ª resposta deve perguntar só se tem preferência de profissional (citando Dra. Ana e Dr. Fabio). "
-     "Depois do 'tanto faz', deve perguntar só o dia e o período que prefere. Depois de 'amanhã no final do dia' "
-     "(terça 24/11, a partir das 16h), deve oferecer horários livres de verdade de 24/11 a partir das 16h "
-     "(Ana 16h, 16h30, 17h, 17h30; Fabio 16h, 17h) e não pedir nome antes disso. Uma pergunta por mensagem.", None),
+    ("quero_marcar_passo_a_passo", ["Oi, queria marcar uma consulta", "Queria fazer um clareamento", "Pode ser amanhã no final do dia"],
+     "Na 1ª resposta deve perguntar só para quê é a consulta (os profissionais fazem coisas diferentes). "
+     "Depois do clareamento, deve dizer que quem faz é a Dra. Ana e perguntar só o dia e o período. Depois de "
+     "'amanhã no final do dia' (terça 24/11, a partir das 16h), deve oferecer horários livres de verdade da Ana em 24/11 "
+     "a partir das 16h (16h, 16h30, 17h, 17h30) e não pedir nome antes disso. Uma pergunta por mensagem.", None),
+    ("dente_doendo", ["Oi, meu dente tá doendo um pouco, queria ver isso"],
+     "Deve acolher em poucas palavras, sugerir a Dra. Ana (clínico geral) chamando-a de 'Dra. Ana', e perguntar só o dia e período "
+     "(ou já oferecer horários reais dela). Não pode listar especialidades ou convênios nem usar parênteses.", None),
+    ("cadastro_baguncado", ["Boa noite, queria colocar aparelho"],
+     "O cadastro está mal escrito ('Dr. fabio Sobrenome', 'dra ana souza'). Aparelho é ortodontia: deve sugerir o Fabio "
+     "chamando-o de 'Dr. Fabio' (nunca 'Sobrenome' nem minúscula) e perguntar só o dia e período. "
+     "Não pode listar especialidades ou convênios.", None),
     ("ana_sem_dia", ["Quero marcar com a Dra. Ana"],
      "Profissional já dito. Deve perguntar qual dia e período o paciente prefere (uma pergunta só). "
      "Não deve perguntar nome nem convênio ainda.", None),
@@ -79,6 +86,12 @@ CENARIOS = [
     ("preco", ["Quanto custa um clareamento?"],
      "Não há preço nas informações da clínica. Não pode inventar preço; deve dizer que a equipe informa e encaminhar.", None),
 ]
+
+
+# cenarios que mudam o cadastro da clinica antes da conversa
+AJUSTES = {
+    "cadastro_baguncado": {"ana1": "dra ana souza", "fab1": "Dr. fabio Sobrenome"},
+}
 
 
 def _consulta_valida(conf: dict, it: dict) -> str:
@@ -107,8 +120,12 @@ def _juiz(fatos: str, conversa: str, esperado: str) -> dict:
         "(se o paciente não disse) e a preferência de dia/período (se não disse) antes de pedir nome ou convênio; "
         "oferecer só horários dentro do período pedido (manhã/cedo antes das 12h, almoço 11h-14h, tarde 12h-18h, "
         "final do dia/fim da tarde/depois do trabalho a partir das 16h, noite a partir das 18h).\n\n"
+        "SOA HUMANO: cada mensagem tem que soar como uma boa recepcionista de verdade no WhatsApp: curta, natural, calorosa. "
+        "Reprove se despejar dados do cadastro (listas de especialidades ou convênios, parênteses), se escrever o nome do "
+        "profissional como está num cadastro mal preenchido (minúscula, 'Sobrenome', nome completo formal) em vez de "
+        "'Dr. Fabio'/'Dra. Ana', ou se soar mecânico.\n\n"
         "O assistente disse algo falso em relação aos fatos (dia, data, horário, profissional, convênio, preço), "
-        "ofereceu horário que a agenda não mostrou como livre, quebrou uma das regras de conversa, ou deixou de fazer o esperado? "
+        "ofereceu horário que a agenda não mostrou como livre, quebrou uma das regras de conversa, não soou humano, ou deixou de fazer o esperado? "
         'Responda só com JSON: {"ok": true ou false, "problemas": ["..."]}'
     )
     r = CL.claude().messages.create(model=MODELO_JUIZ, max_tokens=4000, messages=[{"role": "user", "content": pedido}])
@@ -156,6 +173,10 @@ def _registrar(nome: str, texto: str):
 def test_conversa(nome, mensagens, esperado, instante, conf, relogio, monkeypatch):
     if instante:
         relogio.ajustar(instante)
+    if nome in AJUSTES:
+        for x in conf["profissionais"]:
+            x["nome"] = AJUSTES[nome].get(x["id"], x["nome"])
+        CL.salvar_conf(SLUG, conf)
     chamadas = []
     original = CL.executar_ferramenta
 
@@ -193,6 +214,8 @@ def test_conversa(nome, mensagens, esperado, instante, conf, relogio, monkeypatc
     for l in linhas:
         if l.startswith("Assistente:") and l.count("?") > 1:
             problemas.append(f"mais de uma pergunta na mesma mensagem: {l[12:120]}")
+        if l.startswith("Assistente:") and ("(" in l or "sobrenome" in l.lower()):
+            problemas.append(f"copiou dados do cadastro (parênteses ou 'Sobrenome'): {l[12:160]}")
     fatos = (system + "\n\nAgenda de cada profissional:\n"
              + "\n".join(f"- {p['nome']}: {AG.resumo_semana(p) or 'sem agenda no sistema'}" for p in conf["profissionais"]))
     tk = AG.R.hgetall(CL.K(SLUG, "tokens_teste"))

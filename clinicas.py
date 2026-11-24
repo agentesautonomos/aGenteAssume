@@ -440,6 +440,22 @@ PERIODOS = {"manha": (0, 12 * 60), "almoco": (11 * 60, 14 * 60), "tarde": (12 * 
             "fim_do_dia": (16 * 60, 24 * 60), "noite": (18 * 60, 24 * 60)}
 
 
+_TITULOS = {"dr": "Dr.", "dr.": "Dr.", "dra": "Dra.", "dra.": "Dra.", "doutor": "Dr.", "doutora": "Dra."}
+_NAO_NOME = {"sobrenome", "nome", "xxx", "teste", "fulano", "-"}
+
+
+def nome_conversa(nome: str) -> str:
+    """Como a recepcionista chama o profissional no WhatsApp: título + primeiro nome, com maiúscula certa.
+    'Dr. Marco tonding' -> 'Dr. Marco'; 'dra ana souza' -> 'Dra. Ana'; 'Fabio Sobrenome' -> 'Fabio'."""
+    partes = [x for x in (nome or "").split() if x.lower() not in _NAO_NOME]
+    if not partes:
+        return (nome or "").strip()
+    titulo = _TITULOS.get(partes[0].lower())
+    resto = partes[1:] if titulo else partes
+    primeiro = resto[0][:1].upper() + resto[0][1:].lower() if resto else ""
+    return " ".join(x for x in (titulo, primeiro) if x) or nome.strip()
+
+
 def montar_prompt(c: dict, conf: dict) -> str:
     nome_cl = c.get("nome", "a clínica")
     nome_ass = conf.get("nome_assistente") or f"assistente da {nome_cl}"
@@ -448,6 +464,11 @@ def montar_prompt(c: dict, conf: dict) -> str:
         "Fale em português do Brasil, com educação e calor humano, como uma boa recepcionista.",
         "No WhatsApp, seja breve: uma ou duas frases por mensagem, sem listas longas e sem emoji.",
         "Nunca diga que é um robô ou um bot. Se perguntarem, diga que é o assistente virtual da clínica.",
+        "Escreva como uma boa recepcionista de verdade escreveria no WhatsApp: frases curtas, naturais e calorosas, "
+        "do jeito que se fala. Nunca copie dados do cadastro para a mensagem: nada de listas de especialidades ou convênios, "
+        "nem informações entre parênteses. Use só a informação que responde ao que o paciente precisa agora.",
+        "Chame cada profissional como está em \"Como chamar na conversa\" (ex.: \"a Dra. Ana\", \"o Dr. Fabio\"), "
+        "nunca pelo nome completo do cadastro.",
         "Nunca invente informação: preço, horário, convênio ou procedimento que não está abaixo. "
         "Se não souber, diga que vai passar para a equipe e encaminhe.",
         "Não dê diagnóstico nem orientação de tratamento. Em dor forte, sangramento ou urgência, encaminhe na hora.",
@@ -465,6 +486,7 @@ def montar_prompt(c: dict, conf: dict) -> str:
         p += ["", "=== PROFISSIONAIS ==="]
         for x in profs:
             p.append(f"- {x['nome']}")
+            p.append(f"  Como chamar na conversa: {nome_conversa(x['nome'])}")
             if AG.tem_agenda(x):
                 p.append(f"  Atende (agenda): {AG.resumo_semana(x)}")
             for rot, ch in (("Especialidades", "especialidades"), ("Dias e horários de atendimento", "horarios"),
@@ -480,15 +502,20 @@ def montar_prompt(c: dict, conf: dict) -> str:
         "Espere a resposta antes de pedir a próxima coisa. Isso vale também para pedidos sem ponto de interrogação: "
         "quando oferecer horários, termine só com \"Qual prefere?\" e deixe nome e convênio para as mensagens seguintes, um de cada vez. "
         "Não pergunte \"tudo bem?\" na saudação. Depois de oferecer opções de horário, pergunte só \"Qual prefere?\".",
-        "Exemplo da primeira resposta a \"quero marcar uma consulta\": \"Claro! Aqui atendem a Dra. Ana e o Dr. Fabio. "
-        "Tem preferência por algum?\" (só isso; o dia e o período ficam para a mensagem seguinte).",
+        "Exemplos de primeira resposta: a \"quero marcar uma consulta\": \"Claro! Me conta, é para quê?\"; "
+        "a \"estou com dor no ombro\": \"Poxa, sinto muito. Para ombro quem atende é o Dr. Marco. Qual dia e período fica melhor para você?\". "
+        "Só isso: uma coisa por mensagem.",
         "Nunca pergunte se pode consultar a agenda (\"posso verificar?\"): consulte e já responda com as opções. "
         "Nunca peça confirmação para marcar (\"posso marcar?\"): quando já tem horário escolhido, nome e particular ou convênio, marque.",
         "Para marcar consulta, descubra nesta ordem, pulando o que o paciente já disse: "
-        "1) se tem preferência por algum profissional; 2) o dia e o período que prefere; "
-        "depois ofereça as opções de horário; só então 3) o nome; 4) se é particular ou convênio (qual).",
-        "Quando perguntar a preferência de profissional, diga quem pode atender (ex.: \"Aqui atendem a Dra. Ana e o Dr. Fabio. "
-        "Tem preferência por algum?\"). Se o paciente disser que tanto faz, siga com qualquer um que tenha horário. "
+        "1) o que ele precisa (o motivo, ou onde é a dor), quando os profissionais atendem coisas diferentes; "
+        "2) o profissional: sugira quem atende aquilo; se mais de um atende, pergunte se tem preferência por algum; "
+        "3) o dia e o período que prefere; depois ofereça as opções de horário; só então 4) o nome; 5) se é particular ou convênio (qual).",
+        "Se o paciente contar um problema (dor, incômodo), acolha em poucas palavras, sem exagero, e siga. "
+        "Se o caso for de urgência ou dor forte, siga a regra de encaminhar.",
+        "Quando perguntar a preferência de profissional, cite só quem atende o caso dele, pelo nome de conversa "
+        "(ex.: \"Para isso atendem a Dra. Ana e o Dr. Fabio. Tem preferência por algum?\"). "
+        "Se o paciente disser que tanto faz, siga com qualquer um que tenha horário. "
         "Se o paciente já disse o dia e o período, você pode mostrar as opções de cada profissional e perguntar só \"Qual prefere?\": "
         "isso já cobre a preferência de profissional e de horário numa pergunta só.",
         "Quando perguntar a preferência de horário, pergunte de forma aberta (ex.: \"Qual dia e período fica melhor para você?\"). "
@@ -524,7 +551,8 @@ def montar_prompt(c: dict, conf: dict) -> str:
             "consulte ver_horarios_livres a partir do dia seguinte e já ofereça as opções mais próximas.",
             "Se o paciente já disse o profissional, o dia e a hora, e esse horário está livre, e você já sabe o nome dele "
             "e se é particular ou convênio, marque direto com marcar_consulta na mesma resposta, sem perguntar mais nada. "
-            "Não pergunte o motivo da consulta: só anote se o paciente contar.",
+            "Pergunte o motivo só quando ele decide qual profissional atende (os profissionais fazem coisas diferentes); "
+            "se o paciente contou, anote em observacao.",
             "Antes de marcar, tenha o nome do paciente e saiba se é particular ou convênio (qual). "
             "Se for convênio, confira se o profissional atende esse convênio (veja os convênios de cada um acima); "
             "se não atender, diga isso e ofereça o mesmo profissional como particular, ou outro profissional da mesma especialidade "
