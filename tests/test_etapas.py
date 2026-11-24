@@ -37,9 +37,10 @@ def test_com_dia_e_sem_profissional_oferece_horarios_e_pergunta_qual_prefere(con
 def test_ordem_horario_nome_convenio_e_marcar(conf):
     b = dict(motivo="limpeza", profissional="Dra. Ana", quando="amanhã")
     assert "até 3 opções" in CL.proxima_etapa(est(**b), conf)
-    assert "nome" in CL.proxima_etapa(est(**b, horario="14h"), conf)
-    assert "particular ou por convênio" in CL.proxima_etapa(est(**b, horario="14h", nome="João"), conf)
-    assert "marcar_consulta agora" in CL.proxima_etapa(est(**b, horario="14h", nome="João", convenio="particular"), conf)
+    b.update(horario="14h", horario_confirmado=True)
+    assert "nome" in CL.proxima_etapa(est(**b), conf)
+    assert "particular ou por convênio" in CL.proxima_etapa(est(**b, nome="João"), conf)
+    assert "marcar_consulta agora" in CL.proxima_etapa(est(**b, nome="João", convenio="particular"), conf)
 
 
 def test_pergunta_do_paciente_vem_primeiro(conf):
@@ -118,3 +119,27 @@ def test_falha_do_conferente_nao_derruba_a_resposta(conf, monkeypatch):
     monkeypatch.setattr(CL, "conferir_resposta", quebra)
     ctx = {"slug": SLUG, "conf": conf, "tel": CL.EXP_TEL, "sim": True, "reservas": []}
     assert asyncio.run(CL.conversar_ia("SYS", [{"role": "user", "content": "Oi"}], ctx, CL.K(SLUG, "tk"))) == "Claro! Me conta, é para quê?"
+
+
+def test_profissional_que_nao_existe_e_dito_ao_paciente(conf):
+    e = CL.proxima_etapa(est(profissional="Dr. Pedro"), conf)
+    assert "não há ninguém com esse nome" in e and "é para quê" in e
+
+
+def test_profissional_sem_agenda_nao_pede_horario_e_anota_pedido(conf):
+    conf["profissionais"].append({"id": "car1", "nome": "Dr. Carlos Reis", "especialidades": "Implante"})
+    e = CL.proxima_etapa(est(motivo="implante", profissional="Dr. Carlos", quando="sábado de manhã",
+                             nome="Lia", convenio="particular"), conf)
+    assert "[AGENDAMENTO" in e and "marcar_consulta" not in e
+
+
+def test_horario_so_pedido_manda_conferir_na_agenda(conf):
+    e = CL.proxima_etapa(est(profissional="Dra. Ana", quando="hoje", horario="9h"), conf)
+    assert "consulte a agenda para o horário que ele pediu (9h)" in e and "já passou" in e
+    e = CL.proxima_etapa(est(profissional="Dra. Ana", quando="hoje", horario="14h", horario_confirmado=True), conf)
+    assert "nome" in e
+
+
+def test_revisao_pega_posso_te_oferecer():
+    _, p = CL.revisar_resposta("Posso te oferecer outro horário amanhã.")
+    assert any("licença" in x for x in p)

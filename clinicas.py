@@ -947,7 +947,7 @@ _RE_HORA = re.compile(r"\b([01]?\d|2[0-3])(?:h(\d{2})?|:([0-5]\d))(?![\d/])")
 _RE_RELATIVO = re.compile(r"\b(depois de amanh[ãa]|amanh[ãa]|hoje)\b", re.I)
 _RE_SEMANA = re.compile(r"\b(semana que vem|pr[óo]xima semana|n?esta semana|n?essa semana)\b", re.I)
 _RE_META = re.compile(r"(pela revis[ãa]o|revis[ãa]o (autom[áa]tica|interna)|nota interna|mensagem anterior|desculp\w* (pela|a) confus[ãa]o|corrigindo|o limite [ée]|a regra de|ferramenta|marcar_consulta|ver_horarios)", re.I)
-_RE_LICENCA = re.compile(r"\b(posso (marcar|agendar|verificar|ver|confirmar|consultar)|quer que eu|deseja que eu|gostaria que eu)\b", re.I)
+_RE_LICENCA = re.compile(r"\b(posso (?:te |lhe )?(marcar|agendar|verificar|ver|confirmar|consultar|oferecer|sugerir|passar)|quer que eu|deseja que eu|gostaria que eu)\b", re.I)
 
 
 def _data_de(dd: int, mm: int, hoje):
@@ -1129,12 +1129,13 @@ def ler_estado(msgs: list, conf: dict, chave_tokens: str) -> dict:
         f"já informou para marcar uma consulta. Profissionais da clínica: {profs or '-'}.\n\n"
         f"CONVERSA:\n{_conversa_txt(msgs)}\n\n"
         "Responda só com JSON, assim:\n"
-        '{"motivo": "...", "profissional": "...", "quando": "...", "horario": "...", "nome": "...", "convenio": "...", '
+        '{"motivo": "...", "profissional": "...", "quando": "...", "horario": "...", "horario_confirmado": false, "nome": "...", "convenio": "...", '
         '"perguntas": ["..."], "fora_do_agendamento": false, "ja_marcado": false}\n'
         "- Use null no que o paciente ainda não disse. Só anote o que o PACIENTE disse ou aceitou, não o que a clínica ofereceu.\n"
         "- motivo: o que ele precisa (dor, limpeza, aparelho...). profissional: o nome que ele escolheu, ou \"tanto faz\".\n"
         "- quando: o dia e/ou período que ele prefere (ex.: \"amanhã à tarde\", \"quinta\", \"qualquer dia\").\n"
-        "- horario: só se ele escolheu ou pediu um horário exato (ex.: \"14h\").\n"
+        "- horario: só se ele escolheu ou pediu um horário exato (ex.: \"14h\"). horario_confirmado: true só se a clínica "
+        "já disse que esse horário está livre (ou o ofereceu) e ele escolheu; false se ele só pediu.\n"
         "- convenio: \"particular\" ou o nome do convênio que ele disse que vai usar.\n"
         "- perguntas: o que a ÚLTIMA mensagem do paciente pergunta ou pede que precisa de resposta direta "
         "(ex.: \"atende Amil?\", \"tem às 9h hoje?\", \"quanto custa?\"). Lista vazia se não perguntou nada.\n"
@@ -1146,6 +1147,18 @@ def ler_estado(msgs: list, conf: dict, chave_tokens: str) -> dict:
 
 def _tem(v) -> bool:
     return bool(v) and str(v).strip().lower() not in ("null", "none", "-", "")
+
+
+def _prof_citado(nome: str, conf: dict):
+    """Acha o profissional que o paciente citou. Devolve o dict, None (nao existe na clinica) ou "" (tanto faz)."""
+    n = slugificar(str(nome)).replace("-", " ")
+    if re.search(r"\b(tanto faz|qualquer|nenhum|sem preferencia)\b", n):
+        return ""
+    palavras = {w for w in n.split() if w not in ("dr", "dra", "doutor", "doutora") and len(w) > 2}
+    for x in conf.get("profissionais", []):
+        if palavras & set(slugificar(x["nome"]).split("-")):
+            return x
+    return None
 
 
 def proxima_etapa(estado: dict, conf: dict) -> str:
@@ -1160,24 +1173,37 @@ def proxima_etapa(estado: dict, conf: dict) -> str:
         linhas.append("1) Antes de tudo, responda com clareza o que o paciente perguntou: " + "; ".join(perguntas)
                       + ". (Se é convênio que não é aceito, diga que não atende; se é horário que já passou, diga que já passou; "
                       "se é dia sem atendimento, diga isso.)")
+    prof = None
+    if _tem(estado.get("profissional")):
+        prof = _prof_citado(estado["profissional"], conf)
+        if prof is None and profs:
+            linhas.append(f"{len(linhas) + 1}) O paciente pediu \"{estado['profissional']}\", que não trabalha na clínica: "
+                          "diga que não há ninguém com esse nome aqui.")
+            estado = {**estado, "profissional": None}
     if estado.get("fora_do_agendamento") or estado.get("ja_marcado"):
         if not linhas:
             return ""
-        return "\n\nETAPA DESTA RESPOSTA (decidida pelo sistema):\n" + linhas[0]
+        return "\n\nETAPA DESTA RESPOSTA (decidida pelo sistema):\n" + "\n".join(linhas)
     falta = None
     for campo, _, pedir in ETAPAS:
         if campo in ("motivo", "profissional") and len(profs) <= 1:
             continue
         if campo == "motivo" and _tem(estado.get("profissional")):
             continue
-        if campo == "horario" and not com_agenda:
+        if campo == "horario" and (not com_agenda or (prof and not AG.tem_agenda(prof))):
             continue
+        if campo == "horario" and _tem(estado.get("horario")) and not estado.get("horario_confirmado"):
+            falta = (campo, f"consulte a agenda para o horário que ele pediu ({estado['horario']}): se estiver livre, siga "
+                            "(e se já tiver nome e particular/convênio, marque direto com marcar_consulta); se não estiver "
+                            "(ocupado, já passou, dia sem atendimento), diga isso e ofereça até 3 opções concretas, "
+                            "com dia, data e hora; pergunte qual prefere")
+            break
         if not _tem(estado.get(campo)):
             falta = (campo, pedir)
             break
     n = len(linhas) + 1
     if falta is None:
-        if com_agenda:
+        if com_agenda and not (prof and not AG.tem_agenda(prof)):
             linhas.append(f"{n}) O paciente já deu tudo: chame marcar_consulta agora (se o horário estiver livre) e confirme "
                           "dia, data, hora, profissional e endereço. Não pergunte mais nada.")
         else:
@@ -1209,6 +1235,8 @@ def conferir_resposta(etapa: str, msgs: list, agenda: list, rascunho: str, chave
         "Dia sem atendimento: tem que dizer.)\n"
         "2) A mensagem faz o passo pedido acima, sem pular para outro e sem pedir coisa que o paciente já disse?\n"
         "3) Algum dia, data, hora, profissional ou convênio contradiz o que a agenda respondeu?\n"
+        "Nunca peça para tirar uma informação verdadeira nem a resposta a algo que o paciente disse ou perguntou "
+        "(ex.: dizer que um profissional não existe na clínica, que um horário já passou, que não há agenda para alguém).\n"
         "Responda só com JSON: {\"problemas\": [\"...\"]} (lista vazia se está bom). Cada problema em uma frase curta, "
         "dizendo o que corrigir.")
     v = _ia_aux(pedido, chave_tokens, 300)
