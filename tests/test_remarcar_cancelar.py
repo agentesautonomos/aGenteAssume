@@ -102,3 +102,8 @@ def test_disse_que_passa_para_a_recepcao_sem_a_linha():
     assert any("faltou a linha" in x for x in p)
     _, p = CL.revisar_resposta("Vou passar o seu pedido para a recepção.\n[AGENDAMENTO: Lia | Dr. Carlos | sábado | particular | ]")
     assert not any("faltou a linha" in x for x in p)
+
+
+def test_revisao_pega_posso_remarcar():
+    _, p = CL.revisar_resposta("Tenho às 9h na sexta. Posso remarcar para sexta 27/11 às 9h?")
+    assert any("licença" in x for x in p)

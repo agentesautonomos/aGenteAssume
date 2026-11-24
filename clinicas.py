@@ -1028,7 +1028,7 @@ _RE_HORA = re.compile(r"\b([01]?\d|2[0-3])(?:h(\d{2})?|:([0-5]\d))(?![\d/])")
 _RE_RELATIVO = re.compile(r"\b(depois de amanh[ãa]|amanh[ãa]|hoje)\b", re.I)
 _RE_SEMANA = re.compile(r"\b(semana que vem|pr[óo]xima semana|n?esta semana|n?essa semana)\b", re.I)
 _RE_META = re.compile(r"(pela revis[ãa]o|revis[ãa]o (autom[áa]tica|interna)|nota interna|mensagem anterior|desculp\w* (pela|a) confus[ãa]o|corrigindo|o limite [ée]|a regra de|ferramenta|marcar_consulta|ver_horarios)", re.I)
-_RE_LICENCA = re.compile(r"\b(posso (?:te |lhe )?(marcar|agendar|verificar|ver|confirmar|consultar|oferecer|sugerir|passar)|quer que eu|deseja que eu|gostaria que eu)\b", re.I)
+_RE_LICENCA = re.compile(r"\b(posso (?:te |lhe )?(marcar|remarcar|cancelar|desmarcar|agendar|verificar|ver|confirmar|consultar|oferecer|sugerir|passar)|quer que eu|deseja que eu|gostaria que eu)\b", re.I)
 
 
 def _data_de(dd: int, mm: int, hoje):
