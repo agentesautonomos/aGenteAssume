@@ -40,6 +40,7 @@ DIAS_LONGOS = ["segunda-feira", "terça-feira", "quarta-feira", "quinta-feira", 
 DURACAO_PADRAO = 30
 ANTECEDENCIA_H_PADRAO = 2     # nao oferece horario que comeca daqui a menos de 2 horas
 JANELA_DIAS_PADRAO = 30       # nao marca alem de 30 dias
+ANTECEDENCIA_MUDAR_H_PADRAO = 24   # o assistente so remarca ou cancela ate 24h antes da consulta
 
 
 def K(slug: str, *partes) -> str:
@@ -433,6 +434,26 @@ def desbloquear(slug: str, iid: str) -> bool:
     R.hdel(hk, iid)
     R.zrem(zk, iid)
     return True
+
+
+def antecedencia_mudar(conf: dict) -> int:
+    try:
+        v = conf.get("ag_antecedencia_mudar_h")
+        return int(v) if v not in (None, "") else ANTECEDENCIA_MUDAR_H_PADRAO
+    except (TypeError, ValueError):
+        return ANTECEDENCIA_MUDAR_H_PADRAO
+
+
+def pode_mudar(conf: dict, it: dict) -> str:
+    """'' se o assistente pode remarcar/cancelar essa consulta; senao o motivo."""
+    h = antecedencia_mudar(conf)
+    inicio = datetime.strptime(f"{it['data']} {it['inicio']}", "%Y-%m-%d %H:%M")
+    falta = inicio - agora_local()
+    if falta < timedelta(0):
+        return "A consulta já passou."
+    if falta < timedelta(hours=h):
+        return f"Faltam menos de {h} horas para a consulta: pela regra da clínica, só a equipe pode remarcar ou cancelar."
+    return ""
 
 
 def consultas_do_tel(slug: str, tel: str, sim: bool = False) -> list:
