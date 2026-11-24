@@ -517,7 +517,8 @@ def montar_prompt(c: dict, conf: dict) -> str:
         "3) o dia e o período que prefere; depois ofereça as opções de horário; só então 4) o nome; 5) se é particular ou convênio (qual).",
         "Sugira só profissionais cujas especialidades cobrem o que o paciente precisa (dor, limpeza, avaliação = clínico geral; "
         "aparelho = ortodontia; implante = implante). Não diga que outro profissional \"também pode ver\" se a especialidade dele não cobre.",
-        "Cumprimente pelo horário de agora (bom dia até 12h, boa tarde até 18h, boa noite depois), mesmo que o paciente use outro.",
+        "Cumprimentar não é obrigatório. Se cumprimentar com bom dia/boa tarde/boa noite, use o do horário de agora "
+        "(bom dia até 12h, boa tarde até 18h, boa noite depois), mesmo que o paciente use outro.",
         "Se o paciente contar um problema (dor, incômodo), acolha em poucas palavras, sem exagero, e siga. "
         "Se o caso for de urgência ou dor forte, siga a regra de encaminhar.",
         "Quando perguntar a preferência de profissional, cite só quem atende o caso dele, pelo nome de conversa "
@@ -942,7 +943,7 @@ _RE_DATA = re.compile(r"\b(\d{1,2})/(\d{1,2})\b")
 _RE_HORA = re.compile(r"\b([01]?\d|2[0-3])(?:h(\d{2})?|:([0-5]\d))(?![\d/])")
 _RE_RELATIVO = re.compile(r"\b(depois de amanh[ãa]|amanh[ãa]|hoje)\b", re.I)
 _RE_SEMANA = re.compile(r"\b(semana que vem|pr[óo]xima semana|esta semana|essa semana)\b", re.I)
-_RE_META = re.compile(r"(pela revis[ãa]o|revis[ãa]o (autom[áa]tica|interna)|nota interna|mensagem anterior|o limite [ée]|a regra de|ferramenta|marcar_consulta|ver_horarios)", re.I)
+_RE_META = re.compile(r"(pela revis[ãa]o|revis[ãa]o (autom[áa]tica|interna)|nota interna|mensagem anterior|desculp\w* (pela|a) confus[ãa]o|corrigindo|o limite [ée]|a regra de|ferramenta|marcar_consulta|ver_horarios)", re.I)
 _RE_LICENCA = re.compile(r"\b(posso (marcar|agendar|verificar|ver|confirmar|consultar)|quer que eu|deseja que eu|gostaria que eu)\b", re.I)
 
 
@@ -1088,7 +1089,8 @@ async def conversar_ia(system: str, msgs: list, ctx: dict, chave_tokens: str) ->
                              "convênio, chame marcar_consulta agora e confirme; se precisar, consulte a agenda de novo. Depois escreva "
                              "a mensagem inteira para o paciente, corrigida, mantendo o que estava certo (e as linhas "
                              "[AGENDAMENTO]/[ENCAMINHAR], se houver). Responda só com a mensagem para o paciente: não comente esta nota, "
-                             "não fale de regras, revisão nem limite."})
+                             "não fale de regras, revisão nem limite, e não peça desculpas nem diga que corrigiu: o paciente "
+                             "não viu a versão anterior."})
                 textos = []
                 continue
             return final
