@@ -436,7 +436,7 @@ def salvar_conf(slug: str, conf: dict):
 
 
 # periodos do dia que o paciente pode pedir (minutos desde 00:00, inicio inclusive, fim exclusivo)
-PERIODOS = {"manha": (0, 12 * 60), "almoco": (11 * 60, 14 * 60), "tarde": (12 * 60, 18 * 60),
+PERIODOS = {"cedo": (0, 10 * 60), "manha": (0, 12 * 60), "almoco": (11 * 60, 14 * 60), "tarde": (12 * 60, 18 * 60),
             "fim_do_dia": (16 * 60, 24 * 60), "noite": (18 * 60, 24 * 60)}
 
 
@@ -527,7 +527,7 @@ def montar_prompt(c: dict, conf: dict) -> str:
         "não devolva a pergunta: consulte a agenda e já ofereça as opções reais mais próximas.",
         "Se o paciente pedir um profissional que não está na lista acima, diga que não há ninguém com esse nome na clínica, "
         "e pergunte o que ele precisa, para indicar quem atende. Não encaminhe para a equipe por isso.",
-        "Entenda o período que o paciente diz: cedo ou de manhã = antes das 12h (cedo = primeiros horários da manhã); "
+        "Entenda o período que o paciente diz: cedo = os primeiros horários da manhã (período cedo); de manhã = antes das 12h; "
         "hora do almoço = 11h às 14h; à tarde ou depois do almoço = 12h às 18h; "
         "final do dia, fim da tarde ou depois do trabalho = a partir das 16h (os últimos horários do dia); "
         "à noite = a partir das 18h. \"Qualquer horário\" ou \"tanto faz\" = sem preferência. "
@@ -562,6 +562,9 @@ def montar_prompt(c: dict, conf: dict) -> str:
             "e se é particular ou convênio, marque direto com marcar_consulta na mesma resposta, sem perguntar mais nada. "
             "Pergunte o motivo só quando ele decide qual profissional atende (os profissionais fazem coisas diferentes); "
             "se o paciente contou, anote em observacao.",
+            "Se o paciente perguntar por um convênio que não está na lista da clínica ou do profissional, comece dizendo "
+            "com clareza que não atende esse convênio (nunca comece com \"claro\" ou \"sim\"), e ofereça particular. "
+            "Você não atende ninguém: fale do profissional na terceira pessoa (\"o Dr. Fabio atende só particular\").",
             "Antes de marcar, tenha o nome do paciente e saiba se é particular ou convênio (qual). "
             "Se for convênio, confira se o profissional atende esse convênio (veja os convênios de cada um acima); "
             "se não atender, diga isso e ofereça o mesmo profissional como particular, ou outro profissional da mesma especialidade "
@@ -699,7 +702,8 @@ def ferramentas_agenda(conf: dict) -> list:
              "data_inicial": {"type": "string", "description": "Primeiro dia a olhar, AAAA-MM-DD. Se não souber, deixe vazio (hoje)."},
              "dias": {"type": "integer", "description": "Quantos dias olhar a partir da data inicial (1 a 14). Padrão 7."},
              "periodo": {"type": "string", "enum": [*PERIODOS, "qualquer"],
-                         "description": "Período que o paciente prefere: manha = antes das 12h (cedo também), "
+                         "description": "Período que o paciente prefere: cedo = primeiros horários da manhã (antes das 10h), "
+                                        "manha = antes das 12h, "
                                         "almoco = 11h às 14h, tarde = 12h às 18h (depois do almoço também), "
                                         "fim_do_dia = a partir das 16h (final do dia, fim da tarde, depois do trabalho), "
                                         "noite = a partir das 18h. Se o paciente pediu uma hora exata, use qualquer. Padrão qualquer."}},
@@ -777,7 +781,16 @@ def _espalhar(hs: list, n: int) -> list:
     return [hs[i] for i in idx]
 
 
-def sugestao_txt(por_prof: list, maximo: int = 3) -> str:
+def _escolher(hs: list, n: int, periodo: str = "") -> list:
+    """Quem pede 'cedo' quer os primeiros; quem pede 'fim do dia'/'noite' quer os ultimos; senao, espalhados."""
+    if periodo == "cedo":
+        return hs[:n]
+    if periodo in ("fim_do_dia", "noite"):
+        return hs[-n:]
+    return _espalhar(hs, n)
+
+
+def sugestao_txt(por_prof: list, maximo: int = 3, periodo: str = "") -> str:
     """por_prof: [(prof, {data: [horas]})]. Monta no maximo 'maximo' opcoes no total, ja escritas para o paciente."""
     com = [(p, d, hs) for p, res in por_prof for d, hs in list(res.items())[:1] if hs]
     if not com:
@@ -786,7 +799,7 @@ def sugestao_txt(por_prof: list, maximo: int = 3) -> str:
     partes = []
     for (p, d, hs), n in zip(com, cota):
         if n:
-            escolha = [hora_falada(h) for h in _espalhar(hs, n)]
+            escolha = [hora_falada(h) for h in _escolher(hs, n, periodo)]
             horas = escolha[0] if len(escolha) == 1 else ", ".join(escolha[:-1]) + " ou " + escolha[-1]
             partes.append(f"{dia_falado(d)} às {horas} com {nome_conversa(p['nome'])}")
     return ("SUGESTÃO PARA OFERECER (no máximo 3 horários no total; escreva o dia exatamente assim): "
@@ -843,7 +856,7 @@ def executar_ferramenta(nome: str, ent: dict, ctx: dict) -> str:
         ctx["_achados"] = []
         partes = [executar_ferramenta(nome, {**ent, "profissional": x["id"]}, ctx) for x in AG.profs_com_agenda(conf)]
         com = [x for x in partes if not x.startswith("Sem horário")]
-        sug = sugestao_txt(ctx.pop("_achados", []))
+        sug = sugestao_txt(ctx.pop("_achados", []), periodo=ent.get("periodo") or "")
         tira = lambda t: "\n".join(l for l in t.split("\n") if not l.startswith("SUGESTÃO PARA OFERECER"))
         return "\n\n".join(tira(x) for x in (com or partes)) + ("\n\n" + sug if com and sug else "")
     prof = AG.achar_prof(conf, ent.get("profissional", ""))
@@ -885,7 +898,7 @@ def executar_ferramenta(nome: str, ent: dict, ctx: dict) -> str:
             linhas.append("Sem horário (dias em que atende): " + _txt_motivos(_motivos(slug, conf, prof, faltam, sim)))
         if "_achados" in ctx:
             ctx["_achados"].append((prof, achados))
-        linhas.append(sugestao_txt([(prof, achados)]))
+        linhas.append(sugestao_txt([(prof, achados)], periodo=ent.get("periodo") or ""))
         return f"Horários livres de {prof['nome']} (consulta de {AG.duracao(prof)} min):\n" + "\n".join(linhas)
     if nome == "marcar_consulta":
         d = _data_param(ent.get("data"))
@@ -918,6 +931,7 @@ def _bloco_para_param(b) -> dict:
 # Revisao automatica da resposta antes de enviar
 # ------------------------------------------------------------
 _RE_DIA_DATA = re.compile(r"\b(segunda|ter[çc]a|quarta|quinta|sexta|s[áa]bado|domingo)(-feira)?(,?\s+(?:dia\s+)?)(\d{1,2})/(\d{1,2})\b", re.I)
+_RE_DIA_REPETIDO = re.compile(r"\b(segunda|ter[çc]a|quarta|quinta|sexta|s[áa]bado|domingo)(-feira)?,?\s+\1(-feira)?\b", re.I)
 _RE_DATA = re.compile(r"\b(\d{1,2})/(\d{1,2})\b")
 _RE_HORA = re.compile(r"\b([01]?\d|2[0-3])(?:h(\d{2})?|:([0-5]\d))(?![\d/])")
 _RE_RELATIVO = re.compile(r"\b(depois de amanh[ãa]|amanh[ãa]|hoje)\b", re.I)
@@ -953,7 +967,8 @@ def revisar_resposta(texto: str, hoje=None) -> tuple:
         certo = certo[0].upper() + certo[1:] if escrito[0].isupper() else certo
         return certo + (m.group(2) or "") + m.group(3) + m.group(4) + "/" + m.group(5)
     texto = _RE_DIA_DATA.sub(corrige_dia, texto)
-    fala = _RE_DIA_DATA.sub(corrige_dia, fala)
+    texto = _RE_DIA_REPETIDO.sub(lambda m: m.group(1) + (m.group(2) or ""), texto)   # "quarta, quarta 25/11" -> "quarta 25/11"
+    fala = _RE_DIA_REPETIDO.sub(lambda m: m.group(1) + (m.group(2) or ""), _RE_DIA_DATA.sub(corrige_dia, fala))
 
     problemas = []
     for frase in re.split(r"(?<=[.!?])\s+|\n", fala):
@@ -1013,8 +1028,10 @@ async def conversar_ia(system: str, msgs: list, ctx: dict, chave_tokens: str) ->
                 ctx.setdefault("revisoes", []).append(problemas)
                 msgs.append({"role": "assistant", "content": resp.content and [_bloco_para_param(b) for b in resp.content] or final})
                 msgs.append({"role": "user", "content": "[revisão interna, o paciente não vê isto] Sua última mensagem não pode ser "
-                             "enviada assim: " + "; ".join(problemas) + ". Reescreva a mensagem inteira para o paciente, corrigida, "
-                             "mantendo o que estava certo (e as linhas [AGENDAMENTO]/[ENCAMINHAR], se houver)."})
+                             "enviada assim: " + "; ".join(problemas) + ". Corrija: se o paciente já deu o horário, o nome e se é particular ou "
+                             "convênio, chame marcar_consulta agora e confirme; se precisar, consulte a agenda de novo. Depois escreva "
+                             "a mensagem inteira para o paciente, corrigida, mantendo o que estava certo (e as linhas "
+                             "[AGENDAMENTO]/[ENCAMINHAR], se houver)."})
                 textos = []
                 continue
             return final

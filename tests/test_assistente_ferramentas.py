@@ -282,3 +282,17 @@ def test_revisao_pega_horarios_demais_perguntas_e_licenca():
     assert any("licença" in p for p in probs)
     _, probs = CL.revisar_resposta("Pronto, marquei quinta 26/11 às 17h com a Dra. Ana.\n[AGENDAMENTO: a | b | c (x) | d | e]", hoje)
     assert probs == []
+
+
+def test_cedo_sugere_os_primeiros_e_fim_do_dia_os_ultimos(ferramenta):
+    r = ferramenta("ver_horarios_livres", profissional="Dra. Ana Souza", data_inicial="2026-11-24", dias=1, periodo="cedo")
+    sug = [l for l in r.split("\n") if l.startswith("SUGESTÃO")][0]
+    assert "8h, 8h30 ou 9h" in sug
+    r = ferramenta("ver_horarios_livres", profissional="Dra. Ana Souza", data_inicial="2026-11-24", dias=1, periodo="fim_do_dia")
+    sug = [l for l in r.split("\n") if l.startswith("SUGESTÃO")][0]
+    assert "16h30, 17h ou 17h30" in sug
+
+
+def test_revisao_tira_dia_repetido():
+    txt, _ = CL.revisar_resposta("Consigo sim! Na quarta, quarta 25/11, a Dra. Ana tem 11h ou 11h30. Qual prefere?", date(2026, 11, 23))
+    assert "Na quarta 25/11" in txt
