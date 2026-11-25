@@ -103,6 +103,14 @@ def tel_envio(tel: str) -> str:
     return "55" + d if len(d) in (10, 11) else d
 
 
+def tel_paciente(v: str) -> str:
+    """Telefone digitado pela equipe no formato do WhatsApp (55 + DDD + numero); '' se nao parece telefone."""
+    d = so_digitos(v)
+    if len(d) in (10, 11):
+        d = "55" + d
+    return d if len(d) in (12, 13) and d.startswith("55") else ""
+
+
 def fmt_tel(tel: str) -> str:
     d = so_digitos(tel)
     if d.startswith("55") and len(d) in (12, 13):
@@ -2223,7 +2231,8 @@ def _rotulo_item(x: dict) -> str:
     if x.get("encaixe"):
         tags += ' <span class="tag">encaixe</span>'
     conv_ = f' · {esc(x["convenio"])}' if x.get("convenio") else ""
-    return f'<b>{esc(x.get("paciente") or "sem nome")}</b>{conv_}{tags}'
+    tel_ = "" if x.get("sim") or not x.get("tel") else f' · <span class="mono">{esc(fmt_tel(x["tel"]))}</span>'
+    return f'<b>{esc(x.get("paciente") or "sem nome")}</b>{tel_}{conv_}{tags}'
 
 
 def html_ag_dia(slug: str, conf: dict, profs: list, d, sim: bool) -> str:
@@ -2289,7 +2298,8 @@ def html_ag_semana(slug: str, conf: dict, profs: list, d, sim: bool, prof_sel: s
                 hr = "dia todo" if it.get("dia_todo") else f"{it['inicio']}–{it['fim']}"
                 conteudo.append(f'<span class="it bl">{hr} bloqueado{quem}</span>')
             else:
-                conteudo.append(f'<a class="it {"sim" if it.get("sim") else ""}" href="/painel/agenda/item/{esc(it["id"])}">'
+                dica = "" if it.get("sim") or not it.get("tel") else f' title="{esc(fmt_tel(it["tel"]))}"'
+                conteudo.append(f'<a class="it {"sim" if it.get("sim") else ""}" href="/painel/agenda/item/{esc(it["id"])}"{dica}>'
                                 f'<span class="mono">{it["inicio"]}</span> {esc(it.get("paciente") or "sem nome")}{quem}</a>')
         n_livres = sum(len(AG.livres_no_dia(slug, conf, p, x, sim, respeitar_regras=False)) for p in profs) if x >= hoje else 0
         if n_livres:
@@ -2388,7 +2398,7 @@ def painel_agenda_nova(prof: str = "", d: str = "", h: str = "", erro: str = "",
         <div><label>Dia</label><input type="date" name="d" value="{dia.isoformat()}" required></div>
         <div><label>Hora</label><input type="time" name="h" value="{esc(h)}" required></div>
         <div><label>Paciente</label><input type="text" name="paciente" required></div>
-        <div><label>WhatsApp do paciente</label><input type="tel" name="tel" placeholder="(11) 99999-8888"></div>
+        <div><label>WhatsApp do paciente</label><input type="tel" name="tel" required placeholder="(11) 99999-8888"></div>
         <div><label>Particular ou convênio</label><input type="text" name="convenio"></div>
       </div>
       <label>Observação</label><input type="text" name="obs">
@@ -2406,8 +2416,12 @@ async def painel_agenda_nova_post(request: Request, s: dict = Depends(exigir_log
     dia, h = _dia(str(f.get("d", ""))), str(f.get("h", ""))[:5]
     if not p:
         return RedirectResponse("/painel/agenda/nova?erro=" + quote("Escolha o profissional."), status_code=303)
+    tel = tel_paciente(str(f.get("tel", "")))
+    if not str(f.get("paciente", "")).strip() or not tel:
+        return RedirectResponse(f"/painel/agenda/nova?prof={p['id']}&d={dia.isoformat()}&h={quote(h)}&erro="
+                                + quote("Preencha o nome e o WhatsApp do paciente (com DDD)."), status_code=303)
     ok, r = AG.reservar(slug, conf, p, dia, h, {
-        "paciente": str(f.get("paciente", "")), "tel": str(f.get("tel", "")), "convenio": str(f.get("convenio", "")),
+        "paciente": str(f.get("paciente", "")), "tel": tel, "convenio": str(f.get("convenio", "")),
         "obs": str(f.get("obs", ""))}, encaixe=bool(f.get("encaixe")), por=_quem(s), origem="equipe")
     if not ok:
         return RedirectResponse(f"/painel/agenda/nova?prof={p['id']}&d={dia.isoformat()}&h={quote(h)}&erro="
