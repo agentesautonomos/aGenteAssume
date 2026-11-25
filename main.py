@@ -543,7 +543,7 @@ def adicionar_lead(nome: str, tel: str, nicho_txt: str = "", extra: dict | None 
             "status": "pendente", "importado_em": datetime.now().isoformat()}
     for k, v in (extra or {}).items():
         if v not in (None, ""):
-            lead[k] = str(v)[:200]
+            lead[k] = str(v)[:1000 if k == "maps_url" else 200]   # link do Maps inteiro: os IDs do Google ficam no fim
     salvar_lead(lead)
     return "ok"
 
@@ -2547,7 +2547,85 @@ async def leads_oi(tel: str, admin: str = Depends(verificar_admin)):
 
 
 LEADS_API_KEY = os.environ.get("LEADS_API_KEY", "")
-LEAD_CAMPOS_EXTRAS = ("cidade", "endereco", "site", "instagram", "horario", "avaliacao", "maps_url")
+LEAD_CAMPOS_EXTRAS = ("cidade", "endereco", "site", "instagram", "horario", "avaliacao", "maps_url",
+                      "place_id", "data_id")
+LEAD_CAMPOS_COMPLETAVEIS = ("horario", "instagram")
+# IDs do Google dentro do link do Maps. So valem inteiros: o delimitador depois do ID garante que
+# o link nao foi cortado no meio dele (leads antigos tinham o link cortado em 200 caracteres).
+_RE_PLACE_ID = re.compile(r"!19s(ChIJ[A-Za-z0-9_\-]+)(?=[!?&#/])")
+_RE_DATA_ID = re.compile(r"!1s(0x[0-9a-f]+:0x[0-9a-f]+)(?=!)")
+
+
+def _verificar_chave_leads(request: Request):
+    if not LEADS_API_KEY:
+        raise HTTPException(status_code=503, detail="LEADS_API_KEY nao configurada no servidor")
+    if not secrets.compare_digest(request.headers.get("x-api-key", "").encode(), LEADS_API_KEY.encode()):
+        raise HTTPException(status_code=401, detail="chave invalida")
+
+
+async def _itens_do_corpo(request: Request) -> list:
+    try:
+        corpo = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="JSON invalido")
+    if isinstance(corpo, dict) and isinstance(corpo.get("leads"), list):
+        return corpo["leads"]
+    if isinstance(corpo, list):
+        return corpo
+    return [corpo]
+
+
+def ids_do_google(dados: dict) -> list:
+    """IDs do Google do lugar: place_id ('ChIJ...') e data_id ('0x...:0x...'), dos campos
+    ou de dentro do link do Maps. Devolve como ['place_id:...', 'data_id:...']."""
+    url = str(dados.get("maps_url") or "")
+    ids = []
+    pid = str(dados.get("place_id") or "").strip()
+    if not pid:
+        m = _RE_PLACE_ID.search(url)
+        pid = m.group(1) if m else ""
+    if pid:
+        ids.append(f"place_id:{pid}")
+    did = str(dados.get("data_id") or "").strip()
+    if not did:
+        m = _RE_DATA_ID.search(url)
+        did = m.group(1) if m else ""
+    if did:
+        ids.append(f"data_id:{did}")
+    return ids
+
+
+def completar_leads_existentes(itens: list, simular: bool = False) -> dict:
+    """Completa horario e instagram de leads que JA existem, casando pelo ID do Google.
+    Nunca cria lead e nunca troca um valor que ja esteja preenchido."""
+    indice = {}
+    for lead in listar_leads():
+        for i in ids_do_google(lead):
+            indice.setdefault(i, lead.get("telefone"))
+    res = {"recebidos": len(itens), "atualizados": 0, "sem_mudanca": 0, "nao_encontrados": 0, "invalidos": 0}
+    for it in itens[:2000]:
+        ids = ids_do_google(it) if isinstance(it, dict) else []
+        if not ids:
+            res["invalidos"] += 1
+            continue
+        tel = next((indice[i] for i in ids if i in indice), None)
+        lead = obter_lead(tel) if tel else None   # le de novo, para nao sobrescrever mudanca recente
+        if not lead:
+            res["nao_encontrados"] += 1
+            continue
+        mudou = False
+        for k in LEAD_CAMPOS_COMPLETAVEIS:
+            v = str(it.get(k) or "").strip()[:200]
+            if v and not str(lead.get(k) or "").strip():
+                lead[k] = v
+                mudou = True
+        if mudou:
+            res["atualizados"] += 1
+            if not simular:
+                salvar_lead(lead)
+        else:
+            res["sem_mudanca"] += 1
+    return res
 
 
 @app.post("/api/leads")
@@ -2555,20 +2633,8 @@ async def api_leads(request: Request):
     """Recebe leads de fora (ex: scraper). Header X-API-Key = variavel LEADS_API_KEY.
     Corpo JSON: um lead, uma lista, ou {"leads": [...]}.
     Campos: nome, telefone, nicho, cidade, endereco, site, instagram, horario, avaliacao, maps_url."""
-    if not LEADS_API_KEY:
-        raise HTTPException(status_code=503, detail="LEADS_API_KEY nao configurada no servidor")
-    if not secrets.compare_digest(request.headers.get("x-api-key", "").encode(), LEADS_API_KEY.encode()):
-        raise HTTPException(status_code=401, detail="chave invalida")
-    try:
-        corpo = await request.json()
-    except Exception:
-        raise HTTPException(status_code=400, detail="JSON invalido")
-    if isinstance(corpo, dict) and isinstance(corpo.get("leads"), list):
-        itens = corpo["leads"]
-    elif isinstance(corpo, list):
-        itens = corpo
-    else:
-        itens = [corpo]
+    _verificar_chave_leads(request)
+    itens = await _itens_do_corpo(request)
     res = {"recebidos": len(itens), "importados": 0, "duplicados": 0, "invalidos": 0}
     for it in itens[:2000]:
         if not isinstance(it, dict):
@@ -2583,6 +2649,19 @@ async def api_leads(request: Request):
             {k: it.get(k) for k in LEAD_CAMPOS_EXTRAS})
         res[{"ok": "importados", "duplicado": "duplicados"}.get(resultado, "invalidos")] += 1
     print(f"API LEADS: {res}")
+    return res
+
+
+@app.post("/api/leads/atualizar")
+async def api_leads_atualizar(request: Request, simular: bool = False):
+    """Completa horario e instagram de leads ja importados. Mesmo header X-API-Key do /api/leads.
+    Cada item: place_id e/ou data_id (ou o maps_url), horario, instagram.
+    Casa pelo ID do Google; nunca cria lead; so preenche campo vazio. ?simular=1 conta sem gravar."""
+    _verificar_chave_leads(request)
+    itens = await _itens_do_corpo(request)
+    res = completar_leads_existentes(itens, simular=simular)
+    res["simulacao"] = simular
+    print(f"API LEADS ATUALIZAR: {res}")
     return res
 
 
