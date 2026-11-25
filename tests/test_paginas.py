@@ -151,3 +151,22 @@ def test_tel_paciente():
     assert CL.tel_paciente("(51) 99268-7358") == "5551992687358"
     assert CL.tel_paciente("5551992687358") == "5551992687358"
     assert CL.tel_paciente("123") == ""
+
+
+# ---------- agenda e conversa ligadas ----------
+def test_consulta_liga_para_conversa_e_conversa_lista_consultas(conf):
+    tel = "5511999990000"
+    CL.registrar_msg("teste", tel, "paciente", "Oi")
+    ok, it = CL.AG.reservar("teste", conf, CL.AG.achar_prof(conf, "ana1"), date(2026, 11, 26), "09:00",
+                            {"paciente": "João", "tel": tel})
+    item = CL.painel_agenda_item(it["id"], s=sessao()).body.decode()
+    assert f'/painel/conversa/{tel}' in item and 'id="remarcar"' in item and 'id="cancelar"' in item
+    conversa = CL.painel_conversa(tel, s=sessao()).body.decode()
+    assert "Próximas consultas" in conversa and f'/painel/agenda/item/{it["id"]}#remarcar' in conversa
+
+
+def test_consulta_sem_conversa_oferece_abrir_no_whatsapp(conf):
+    ok, it = CL.AG.reservar("teste", conf, CL.AG.achar_prof(conf, "ana1"), date(2026, 11, 26), "10:00",
+                            {"paciente": "Maria", "tel": "5511988887777"})
+    item = CL.painel_agenda_item(it["id"], s=sessao()).body.decode()
+    assert "https://wa.me/5511988887777" in item

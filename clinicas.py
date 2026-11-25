@@ -2101,11 +2101,18 @@ def painel_conversa(tel: str, s: dict = Depends(exigir_login)):
                       "Assuma e responda pelo WhatsApp da clínica.",
         "humano": f"Com {esc(info.get('assumido_por') or 'a equipe')}. O assistente não responde até alguém devolver a conversa.",
     }[e]
+    consultas = AG.consultas_do_tel(slug, tel)
+    lista_c = "".join(
+        f'<p style="font-size:14px;margin:6px 0"><b>{esc(AG.quando_txt(x))}</b> com {esc(x["prof_nome"])} · '
+        f'<a href="/painel/agenda/item/{esc(x["id"])}">abrir</a> · <a href="/painel/agenda/item/{esc(x["id"])}#remarcar">remarcar</a> · '
+        f'<a href="/painel/agenda/item/{esc(x["id"])}#cancelar">cancelar</a></p>' for x in consultas)
+    card_c = f'<div class="card"><h2>Próximas consultas</h2>{lista_c or "<div class=vazio>Nenhuma consulta marcada.</div>"}</div>'
     corpo = f"""<p style="margin-bottom:12px"><a href="/painel">Voltar ao painel</a></p>
     <div class="card"><div class="linha"><h2 style="margin:0">{nome_ou_tel(info)}</h2>
       <span class="mono" style="color:var(--txt2);font-size:13px">{fmt_tel(tel)}</span>{tag_estado(info)}</div>
       <p style="color:var(--txt2);font-size:14px;margin:8px 0 12px">{explica}</p>
       <div class="linha">{acoes}</div></div>
+    {card_c}
     <div class="card"><div class="chat">{''.join(bolhas) or '<div class="vazio">Sem mensagens.</div>'}</div></div>"""
     return html_resp(pagina("Conversa", corpo, s, "conversas", '<meta http-equiv="refresh" content="30">'))
 
@@ -2442,6 +2449,8 @@ def painel_agenda_item(iid: str, erro: str = "", msg: str = "", s: dict = Depend
     conversa = ""
     if tel and not it.get("sim") and R.exists(K(slug, "conv", tel)):
         conversa = f' · <a href="/painel/conversa/{tel}">ver conversa</a>'
+    if tel and not it.get("sim") and not conversa:
+        conversa = f' · <a href="https://wa.me/{tel}" target="_blank" rel="noopener">abrir no WhatsApp</a>'
     contato = (f'<span class="mono">{fmt_tel(tel)}</span>{conversa}' if tel else
                ("simulação (aba Simular)" if it.get("sim") else "sem WhatsApp"))
     mud = "".join(f'<li>{esc(m.get("acao"))} por {esc(m.get("por") or "-")} {ha_quanto(m.get("em", "") + "-03:00")}'
@@ -2451,7 +2460,7 @@ def painel_agenda_item(iid: str, erro: str = "", msg: str = "", s: dict = Depend
     avisar = ('<label style="margin-top:10px"><input type="checkbox" name="avisar" value="1" checked> '
               'Avisar o paciente pelo WhatsApp</label>') if pode_avisar else ""
     acoes = "" if cancelada else f"""
-    <form method="post" action="/painel/agenda/item/{esc(iid)}/mover" class="card" style="max-width:560px"><h2>Mudar dia ou horário</h2>
+    <form id="remarcar" method="post" action="/painel/agenda/item/{esc(iid)}/mover" class="card" style="max-width:560px"><h2>Remarcar (mudar dia ou horário)</h2>
       <div class="grid2">
         <div><label>Profissional</label><select name="prof">{_opts_prof(AG.profs_com_agenda(conf), it.get("prof_id", ""))}</select></div>
         <div><label>Dia</label><input type="date" name="d" value="{it['data']}" required></div>
@@ -2460,7 +2469,7 @@ def painel_agenda_item(iid: str, erro: str = "", msg: str = "", s: dict = Depend
       <label style="margin-top:10px"><input type="checkbox" name="encaixe" value="1"> Encaixe (fora da grade de horários)</label>
       {avisar}
       <div style="margin-top:12px"><button class="btn">Mudar</button></div></form>
-    <form method="post" action="/painel/agenda/item/{esc(iid)}/cancelar" class="card" style="max-width:560px"><h2>Cancelar consulta</h2>
+    <form id="cancelar" method="post" action="/painel/agenda/item/{esc(iid)}/cancelar" class="card" style="max-width:560px"><h2>Cancelar consulta</h2>
       {avisar}
       <div style="margin-top:12px"><button class="btn sec">Cancelar consulta</button></div></form>"""
     corpo = f"""<p style="margin-bottom:12px"><a href="{_link_ag(dia, sim=it.get('sim', False))}">Voltar à agenda</a></p>{aviso}
