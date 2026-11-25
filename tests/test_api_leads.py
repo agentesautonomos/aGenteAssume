@@ -174,3 +174,32 @@ def test_link_cortado_casa_pelo_data_id_e_nunca_por_id_pela_metade(app_main):
 def test_link_do_maps_agora_e_guardado_inteiro(app_main):
     _post(app_main, [dict(LEAD_ANTIGO, maps_url=URL_LONGA)])
     assert app_main.obter_lead("5511970001111")["maps_url"] == URL_LONGA
+
+
+def test_resposta_do_dentista_nao_perde_os_dados_do_maps(app_main):
+    _post(app_main, [LEAD])
+    tel = "5511998351187"
+    lead = app_main.obter_lead(tel)
+    lead["status"], lead["enviado_em"] = "enviado", "2026-11-25T10:00:00"
+    app_main.salvar_lead(lead)
+
+    app_main.processar_retorno_lead(tel)
+
+    assert app_main.obter_lead(tel) is None          # saiu da lista de leads (virou conversa)
+    info = app_main.obter_lead_info(tel)
+    for campo in ("nome", "cidade", "endereco", "horario", "instagram", "avaliacao", "maps_url", "nicho_texto"):
+        assert info[campo] == lead[campo], campo
+    assert info["enviado_em"] == "2026-11-25T10:00:00"
+    assert info["status"] == "respondeu" and info["respondeu_em"]
+    # o aviso de primeiro contato continua igual (nome, nicho, cidade e demora)
+    pend = app_main.json.loads(app_main.r.get(f"contato_pendente:{tel}"))
+    assert pend["nome"] == LEAD["nome"] and "demora_seg" in pend and "endereco" not in pend
+
+
+def test_resposta_mantem_o_que_ja_estava_em_lead_info(app_main):
+    _post(app_main, [LEAD])
+    tel = "5511998351187"
+    app_main.r.set(f"lead_info:{tel}", app_main.json.dumps({"sem_script": True}))
+    app_main.processar_retorno_lead(tel)
+    info = app_main.obter_lead_info(tel)
+    assert info["sem_script"] is True and info["endereco"] == LEAD["endereco"]
