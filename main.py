@@ -2553,7 +2553,7 @@ async def leads_oi(tel: str, admin: str = Depends(verificar_admin)):
 LEADS_API_KEY = os.environ.get("LEADS_API_KEY", "")
 LEAD_CAMPOS_EXTRAS = ("cidade", "endereco", "site", "instagram", "horario", "avaliacao", "maps_url",
                       "place_id", "data_id")
-LEAD_CAMPOS_COMPLETAVEIS = ("horario", "instagram")
+LEAD_CAMPOS_COMPLETAVEIS = ("horario", "instagram", "place_id", "data_id")
 # IDs do Google dentro do link do Maps. So valem inteiros: o delimitador depois do ID garante que
 # o link nao foi cortado no meio dele (leads antigos tinham o link cortado em 200 caracteres).
 _RE_PLACE_ID = re.compile(r"!19s(ChIJ[A-Za-z0-9_\-]+)(?=[!?&#/])")
@@ -2600,7 +2600,7 @@ def ids_do_google(dados: dict) -> list:
 
 
 def completar_leads_existentes(itens: list, simular: bool = False) -> dict:
-    """Completa horario e instagram de leads que JA existem, casando pelo ID do Google.
+    """Completa horario, instagram e os IDs do Google de leads que JA existem, casando pelo ID do Google.
     Nunca cria lead e nunca troca um valor que ja esteja preenchido."""
     indice = {}
     for lead in listar_leads():
@@ -2658,7 +2658,7 @@ async def api_leads(request: Request):
 
 @app.post("/api/leads/atualizar")
 async def api_leads_atualizar(request: Request, simular: bool = False):
-    """Completa horario e instagram de leads ja importados. Mesmo header X-API-Key do /api/leads.
+    """Completa horario, instagram, place_id e data_id de leads ja importados. Mesmo header X-API-Key do /api/leads.
     Cada item: place_id e/ou data_id (ou o maps_url), horario, instagram.
     Casa pelo ID do Google; nunca cria lead; so preenche campo vazio. ?simular=1 conta sem gravar."""
     _verificar_chave_leads(request)

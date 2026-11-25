@@ -203,3 +203,21 @@ def test_resposta_mantem_o_que_ja_estava_em_lead_info(app_main):
     app_main.processar_retorno_lead(tel)
     info = app_main.obter_lead_info(tel)
     assert info["sem_script"] is True and info["endereco"] == LEAD["endereco"]
+
+
+def test_atualizar_completa_os_ids_do_google(app_main):
+    # lead antigo, so com o data_id dentro do link cortado
+    app_main.salvar_lead({"telefone": "5511970003333", "nome": "Oral Max", "status": "pendente",
+                          "maps_url": URL_LONGA[:URL_LONGA.index(PID) + 8]})
+    resp = _atualizar(app_main, [{"place_id": PID, "data_id": DID}])
+    assert resp.json()["atualizados"] == 1
+    lead = app_main.obter_lead("5511970003333")
+    assert lead["place_id"] == PID and lead["data_id"] == DID
+    # agora o lead casa direto pelo place_id guardado
+    assert f"place_id:{PID}" in app_main.ids_do_google(lead)
+
+
+def test_lead_novo_guarda_os_ids_do_google(app_main):
+    _post(app_main, [dict(LEAD, place_id=PID, data_id=DID)])
+    lead = app_main.obter_lead("5511998351187")
+    assert lead["place_id"] == PID and lead["data_id"] == DID
