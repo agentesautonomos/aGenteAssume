@@ -555,6 +555,20 @@ def nicho_lead_badge(lead: dict) -> str:
            (f' <span class="badge badge-freemium">{esc(c)}</span>' if c else "")
 
 
+def lead_detalhes_html(lead: dict) -> str:
+    """Linha discreta com horario de funcionamento e Instagram do lead (quando houver)."""
+    partes = []
+    h = (lead.get("horario") or "").strip()
+    ig = (lead.get("instagram") or "").strip()
+    if h:
+        partes.append(f"Horário: {esc(h)}")
+    if ig.startswith("http"):
+        partes.append(f'<a href="{esc(ig)}" target="_blank" rel="noopener">Instagram</a>')
+    if not partes:
+        return ""
+    return f'<div style="font-size:12px;color:#888;margin-top:4px">{" · ".join(partes)}</div>'
+
+
 def montar_oi_texto(lead: dict) -> str:
     """Troca {nome} pelo nome do lead (ou tira o marcador se nao houver nome)."""
     texto = obter_oi_texto()
@@ -2415,7 +2429,7 @@ def painel_leads(admin: str = Depends(verificar_admin), msg: str = ""):
         nome = esc(l.get("nome") or "(sem nome)")
         rows_pend += f"""
         <div class="aluno-row">
-            <div><strong>{nome}</strong> <span class="badge badge-freemium">{tel}</span>{nicho_lead_badge(l)}</div>
+            <div><strong>{nome}</strong> <span class="badge badge-freemium">{tel}</span>{nicho_lead_badge(l)}{lead_detalhes_html(l)}</div>
             <div style="display:flex;gap:6px">
                 <form method="post" action="/admin/leads/oi/{tel}"><button type="submit" class="btn btn-primary">Enviar isca</button></form>
                 <form method="post" action="/admin/leads/remover/{tel}" onsubmit="return confirm('Remover este lead?')"><button type="submit" class="btn btn-danger">Remover</button></form>
@@ -2533,12 +2547,14 @@ async def leads_oi(tel: str, admin: str = Depends(verificar_admin)):
 
 
 LEADS_API_KEY = os.environ.get("LEADS_API_KEY", "")
+LEAD_CAMPOS_EXTRAS = ("cidade", "endereco", "site", "instagram", "horario", "avaliacao", "maps_url")
 
 
 @app.post("/api/leads")
 async def api_leads(request: Request):
     """Recebe leads de fora (ex: scraper). Header X-API-Key = variavel LEADS_API_KEY.
-    Corpo JSON: um lead, uma lista, ou {"leads": [...]}. Campos: nome, telefone, nicho, cidade, endereco, site, avaliacao, maps_url."""
+    Corpo JSON: um lead, uma lista, ou {"leads": [...]}.
+    Campos: nome, telefone, nicho, cidade, endereco, site, instagram, horario, avaliacao, maps_url."""
     if not LEADS_API_KEY:
         raise HTTPException(status_code=503, detail="LEADS_API_KEY nao configurada no servidor")
     if not secrets.compare_digest(request.headers.get("x-api-key", "").encode(), LEADS_API_KEY.encode()):
@@ -2564,7 +2580,7 @@ async def api_leads(request: Request):
             continue
         resultado = adicionar_lead(
             str(it.get("nome") or ""), tel, str(it.get("nicho") or "dentista"),
-            {k: it.get(k) for k in ("cidade", "endereco", "site", "avaliacao", "maps_url")})
+            {k: it.get(k) for k in LEAD_CAMPOS_EXTRAS})
         res[{"ok": "importados", "duplicado": "duplicados"}.get(resultado, "invalidos")] += 1
     print(f"API LEADS: {res}")
     return res
