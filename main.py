@@ -621,14 +621,18 @@ def fmt_duracao(seg) -> str:
 
 def processar_retorno_lead(telefone: str):
     """Chamada quando chega mensagem: se o numero era um lead, ele vira usuario.
-    Guarda nome e nicho da importacao e mede a demora da resposta ao 'oi' (so no 1o contato)."""
+    Guarda TODOS os dados da importacao (endereco, horario, Instagram, site, nota, link do Maps...)
+    em lead_info, para o agente poder usar na conversa, e mede a demora da resposta ao 'oi'."""
     lead = obter_lead(telefone)
     if not lead:
         return
-    apagar_lead(telefone)
-    info = {"nome": lead.get("nome", ""), "nicho_texto": lead.get("nicho_texto", ""), "cidade": lead.get("cidade", "")}
+    info = dict(lead)
+    info.update(obter_lead_info(telefone))   # nao perde o que ja estava guardado (ex: sem_script)
+    info["status"] = "respondeu"
+    info["respondeu_em"] = datetime.now().isoformat()
     r.set(f"{LEAD_INFO_PREFIX}{telefone}", json.dumps(info))
-    pend = dict(info)
+    apagar_lead(telefone)   # so apaga depois de copiar tudo
+    pend = {"nome": lead.get("nome", ""), "nicho_texto": lead.get("nicho_texto", ""), "cidade": lead.get("cidade", "")}
     if lead.get("status") == "enviado" and lead.get("enviado_em"):
         try:
             seg = int((datetime.now() - datetime.fromisoformat(lead["enviado_em"])).total_seconds())
