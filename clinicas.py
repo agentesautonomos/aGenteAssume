@@ -2198,6 +2198,9 @@ AG_CSS = """<style>
 .ag-sem .it.sim{background:#fff;border:1px dashed var(--lilas)}
 .ag-sem .it.bl{background:var(--papel);color:var(--txt2)}
 .ag-sem .hoje{background:var(--ok-bg)}
+.ag-mes th{text-align:left;border-top:2px solid var(--linha)}
+.ag-mes tr:first-child th{border-top:none;color:var(--txt2);font-weight:400}
+.ag-mes td{vertical-align:top;height:64px}
 </style>"""
 
 
@@ -2283,36 +2286,66 @@ def html_ag_dia(slug: str, conf: dict, profs: list, d, sim: bool) -> str:
     return "".join(blocos)
 
 
-def html_ag_semana(slug: str, conf: dict, profs: list, d, sim: bool, prof_sel: str) -> str:
+MESES = ["janeiro", "fevereiro", "março", "abril", "maio", "junho", "julho", "agosto", "setembro", "outubro",
+         "novembro", "dezembro"]
+
+
+def mes_txt(ini, fim=None) -> str:
+    """'Novembro de 2026' ou 'Novembro e dezembro de 2026' (ou com os dois anos, na virada)."""
+    fim = fim or ini
+    if (ini.year, ini.month) == (fim.year, fim.month):
+        return f"{MESES[ini.month - 1].capitalize()} de {ini.year}"
+    if ini.year == fim.year:
+        return f"{MESES[ini.month - 1].capitalize()} e {MESES[fim.month - 1]} de {ini.year}"
+    return f"{MESES[ini.month - 1].capitalize()} de {ini.year} e {MESES[fim.month - 1]} de {fim.year}"
+
+
+def html_ag_semana(slug: str, conf: dict, profs: list, d, sim: bool, prof_sel: str, semanas: int = 1) -> str:
+    """Uma linha por semana (seg a dom), a partir da semana de d. semanas=4 é a visão de 4 semanas."""
     ini = d - timedelta(days=d.weekday())
-    dias = [ini + timedelta(days=i) for i in range(7)]
-    itens = AG.listar(slug, ini, dias[-1], sim)
+    todos_dias = [ini + timedelta(days=i) for i in range(7 * semanas)]
+    itens = AG.listar(slug, ini, todos_dias[-1], sim)
     ids = {p["id"] for p in profs}
     hoje = agora().date()
-    cab = "".join(f'<th class="{"hoje" if x == hoje else ""}"><a href="{_link_ag(x, "dia", prof_sel, sim)}">'
-                  f'{AG.DIAS_CURTOS[x.weekday()]} {x.strftime("%d/%m")}</a>'
-                  + (f'<br><small style="font-weight:400">{esc(AG.fecha_no_feriado(conf, x))}</small>' if AG.fecha_no_feriado(conf, x) else "")
-                  + '</th>' for x in dias)
-    cels = []
-    for x in dias:
-        dd = x.isoformat()
-        conteudo = []
-        for it in itens:
-            if it["data"] != dd or (it.get("prof_id") and it["prof_id"] not in ids):
-                continue
-            quem = "" if len(profs) == 1 else f' · {esc(it.get("prof_nome", ""))}'
-            if it.get("tipo") == "bloqueio":
-                hr = "dia todo" if it.get("dia_todo") else f"{it['inicio']}–{it['fim']}"
-                conteudo.append(f'<span class="it bl">{hr} bloqueado{quem}</span>')
-            else:
-                dica = "" if it.get("sim") or not it.get("tel") else f' title="{esc(fmt_tel(it["tel"]))}"'
-                conteudo.append(f'<a class="it {"sim" if it.get("sim") else ""}" href="/painel/agenda/item/{esc(it["id"])}"{dica}>'
-                                f'<span class="mono">{it["inicio"]}</span> {esc(it.get("paciente") or "sem nome")}{quem}</a>')
-        n_livres = sum(len(AG.livres_no_dia(slug, conf, p, x, sim, respeitar_regras=False)) for p in profs) if x >= hoje else 0
-        if n_livres:
-            conteudo.append(f'<a href="{_link_ag(x, "dia", prof_sel, sim)}" style="font-size:12px;color:var(--txt2)">{n_livres} livres</a>')
-        cels.append(f'<td class="{"hoje" if x == hoje else ""}">{"".join(conteudo)}</td>')
-    return (f'<div class="card ag-sem"><table><tr>{cab}</tr><tr>{"".join(cels)}</tr></table></div>')
+
+    def rotulo_dia(x):
+        # na visão de 4 semanas, o primeiro dia mostrado e o dia 1 de cada mês levam o mês, para a virada ficar visível
+        if semanas == 1:
+            return x.strftime("%d/%m")
+        return f"{x.day} {MESES[x.month - 1][:3]}" if x.day == 1 or x == ini else str(x.day)
+
+    linhas = []
+    if semanas > 1:
+        linhas.append("<tr>" + "".join(f"<th>{AG.DIAS_CURTOS[i]}</th>" for i in range(7)) + "</tr>")
+    for w in range(semanas):
+        dias = todos_dias[7 * w:7 * w + 7]
+        cab = "".join(f'<th class="{"hoje" if x == hoje else ""}">'
+                      f'<a href="{_link_ag(x, "dia", prof_sel, sim)}">'
+                      + (f'{AG.DIAS_CURTOS[x.weekday()]} ' if semanas == 1 else "") + f'{rotulo_dia(x)}</a>'
+                      + (f'<br><small style="font-weight:400">{esc(AG.fecha_no_feriado(conf, x))}</small>' if AG.fecha_no_feriado(conf, x) else "")
+                      + '</th>' for x in dias)
+        cels = []
+        for x in dias:
+            dd = x.isoformat()
+            conteudo = []
+            for it in itens:
+                if it["data"] != dd or (it.get("prof_id") and it["prof_id"] not in ids):
+                    continue
+                quem = "" if len(profs) == 1 else f' · {esc(it.get("prof_nome", ""))}'
+                if it.get("tipo") == "bloqueio":
+                    hr = "dia todo" if it.get("dia_todo") else f"{it['inicio']}–{it['fim']}"
+                    conteudo.append(f'<span class="it bl">{hr} bloqueado{quem}</span>')
+                else:
+                    dica = "" if it.get("sim") or not it.get("tel") else f' title="{esc(fmt_tel(it["tel"]))}"'
+                    conteudo.append(f'<a class="it {"sim" if it.get("sim") else ""}" href="/painel/agenda/item/{esc(it["id"])}"{dica}>'
+                                    f'<span class="mono">{it["inicio"]}</span> {esc(it.get("paciente") or "sem nome")}{quem}</a>')
+            n_livres = sum(len(AG.livres_no_dia(slug, conf, p, x, sim, respeitar_regras=False)) for p in profs) if x >= hoje else 0
+            if n_livres:
+                conteudo.append(f'<a href="{_link_ag(x, "dia", prof_sel, sim)}" style="font-size:12px;color:var(--txt2)">{n_livres} livres</a>')
+            cels.append(f'<td class="{"hoje" if x == hoje else ""}">{"".join(conteudo)}</td>')
+        linhas.append(f'<tr>{cab}</tr><tr>{"".join(cels)}</tr>')
+    classe = "ag-sem" + (" ag-mes" if semanas > 1 else "")
+    return f'<div class="card {classe}"><table>{"".join(linhas)}</table></div>'
 
 
 @router.get("/painel/agenda", response_class=HTMLResponse)
@@ -2322,7 +2355,7 @@ def painel_agenda(d: str = "", v: str = "dia", prof: str = "", sim: int = 0, msg
     conf = obter_conf(slug)
     todos = AG.profs_com_agenda(conf)
     dia = _dia(d)
-    v = "semana" if v == "semana" else "dia"
+    v = v if v in ("semana", "4sem") else "dia"
     simb = bool(sim)
     profs = [p for p in todos if not prof or p["id"] == prof]
     aviso = (f'<div class="aviso">{esc(msg)}</div>' if msg else "") + (f'<div class="aviso erro">{esc(erro)}</div>' if erro else "")
@@ -2334,13 +2367,15 @@ def painel_agenda(d: str = "", v: str = "dia", prof: str = "", sim: int = 0, msg
           e a recepção vê tudo aqui: move, cancela e bloqueia.</p>
           <a class="btn lil" href="/painel/profissionais">Preencher os horários</a></div>{html_ag_pedidos_link(slug)}"""
         return html_resp(pagina("Agenda", corpo, s, "agenda", AG_CSS))
-    passo = 7 if v == "semana" else 1
+    passo = {"semana": 7, "4sem": 28}.get(v, 1)
     ant, prox = dia - timedelta(days=passo), dia + timedelta(days=passo)
-    if v == "semana":
+    if v in ("semana", "4sem"):
         ini = dia - timedelta(days=dia.weekday())
-        titulo = f"Semana de {ini.strftime('%d/%m')} a {(ini + timedelta(days=6)).strftime('%d/%m')}"
+        fim = ini + timedelta(days=passo - 1)
+        mes = mes_txt(ini, fim)
+        titulo = f"{mes} · {ini.strftime('%d/%m')} a {fim.strftime('%d/%m')}"
     else:
-        titulo = AG.quando_txt(dia).capitalize()
+        titulo = f"{mes_txt(dia)} · {AG.quando_txt(dia)}"
     controles = f"""<div class="ag-ctl">
       <a class="btn sec peq" href="{_link_ag(ant, v, prof, simb)}">‹</a>
       <a class="btn sec peq" href="{_link_ag(agora().date(), v, prof, simb)}">Hoje</a>
@@ -2349,7 +2384,8 @@ def painel_agenda(d: str = "", v: str = "dia", prof: str = "", sim: int = 0, msg
       <form method="get" action="/painel/agenda" style="margin-left:auto">
         <input type="date" name="d" value="{dia.isoformat()}" onchange="this.form.submit()">
         <select name="v" onchange="this.form.submit()"><option value="dia">Dia</option>
-          <option value="semana" {"selected" if v == "semana" else ""}>Semana</option></select>
+          <option value="semana" {"selected" if v == "semana" else ""}>Semana</option>
+          <option value="4sem" {"selected" if v == "4sem" else ""}>4 semanas</option></select>
         {'<select name="prof" onchange="this.form.submit()">' + _opts_prof(todos, prof, "Todos os profissionais") + '</select>' if len(todos) > 1 else ''}
         <label style="margin:0;font-size:13px"><input type="checkbox" name="sim" value="1" {"checked" if simb else ""}
           onchange="this.form.submit()"> mostrar simulação</label>
@@ -2358,7 +2394,10 @@ def painel_agenda(d: str = "", v: str = "dia", prof: str = "", sim: int = 0, msg
       <a class="btn" href="/painel/agenda/nova?d={dia.isoformat()}{'&prof=' + prof if prof else ''}">Marcar consulta</a>
       <a class="btn sec" href="#bloquear" onclick="document.getElementById('bloquear').open=true">Bloquear horário</a>
     </div>"""
-    miolo = html_ag_semana(slug, conf, profs, dia, simb, prof) if v == "semana" else html_ag_dia(slug, conf, profs, dia, simb)
+    if v == "dia":
+        miolo = html_ag_dia(slug, conf, profs, dia, simb)
+    else:
+        miolo = html_ag_semana(slug, conf, profs, dia, simb, prof, 4 if v == "4sem" else 1)
     bloquear = f"""<details class="card" id="bloquear"><summary><b>Bloquear horário</b> (folga, feriado, compromisso)</summary>
       <form method="post" action="/painel/agenda/bloquear" style="margin-top:8px">
         <div class="grid2">
