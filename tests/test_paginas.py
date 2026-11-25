@@ -170,3 +170,23 @@ def test_consulta_sem_conversa_oferece_abrir_no_whatsapp(conf):
                             {"paciente": "Maria", "tel": "5511988887777"})
     item = CL.painel_agenda_item(it["id"], s=sessao()).body.decode()
     assert "https://wa.me/5511988887777" in item
+
+
+def test_agenda_quatro_semanas_e_mes(conf, relogio):
+    profs = CL.AG.profs_com_agenda(conf)
+    h = CL.html_ag_semana("teste", conf, profs, date(2026, 11, 25), False, "", 4)
+    assert h.count("<tr>") == 1 + 4 * 2          # cabeçalho dos dias + 4 semanas (dias e conteúdo)
+    assert "23 nov" in h and "1 dez" in h and "20</a>" in h   # de seg 23/11 a dom 20/12
+    assert "d=2026-12-20" in h and "d=2026-12-21" not in h
+    assert CL.mes_txt(date(2026, 11, 23)) == "Novembro de 2026"
+    assert CL.mes_txt(date(2026, 11, 23), date(2026, 12, 20)) == "Novembro e dezembro de 2026"
+    assert CL.mes_txt(date(2026, 12, 28), date(2027, 1, 3)) == "Dezembro de 2026 e janeiro de 2027"
+
+
+def test_pagina_agenda_quatro_semanas(conf):
+    h = CL.painel_agenda(d="2026-11-25", v="4sem", prof="", sim=0, msg="", erro="", s=sessao()).body.decode()
+    assert "Novembro e dezembro de 2026" in h and "23/11 a 20/12" in h
+    assert 'value="4sem" selected' in h
+    assert "d=2026-12-23&v=4sem" in h          # › anda 4 semanas
+    h = CL.painel_agenda(d="2026-11-25", v="dia", prof="", sim=0, msg="", erro="", s=sessao()).body.decode()
+    assert "Novembro de 2026" in h
