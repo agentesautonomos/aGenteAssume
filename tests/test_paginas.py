@@ -125,3 +125,48 @@ def test_logo_recusa_svg_e_arquivo_grande():
     r = asyncio.run(CL.painel_logo_post(_Arq(PNG_1PX + b"0" * CL.LOGO_MAX_BYTES), s=s))
     assert "500" in r.headers["location"]
     assert not CL.obter_clinica("teste").get("logo_v")
+
+
+# ---------- agendamento com horário, nome e número ----------
+def test_agenda_do_dia_mostra_nome_e_telefone(conf):
+    p = CL.AG.achar_prof(conf, "ana1")
+    CL.AG.reservar("teste", conf, p, date(2026, 11, 26), "09:00", {"paciente": "João", "tel": "5511999990000"})
+    html = CL.html_ag_dia("teste", conf, CL.AG.profs_com_agenda(conf), date(2026, 11, 26), False)
+    assert "João" in html and "(11) 99999-0000" in html and "09:00" in html
+    sem = CL.html_ag_semana("teste", conf, CL.AG.profs_com_agenda(conf), date(2026, 11, 23), False, "")
+    assert 'title="(11) 99999-0000"' in sem
+
+
+def test_marcar_pela_equipe_exige_nome_e_whatsapp(conf):
+    base = {"prof": "ana1", "d": "2026-11-26", "h": "10:00", "paciente": "Maria"}
+    r = _post(CL.painel_agenda_nova_post, {**base, "tel": ""})
+    assert "erro=" in r.headers["location"]
+    r = _post(CL.painel_agenda_nova_post, {**base, "tel": "(11) 98888-7777"})
+    assert "msg=" in r.headers["location"]
+    it = [x for x in CL.AG.listar("teste", date(2026, 11, 26), date(2026, 11, 26)) if x["paciente"] == "Maria"][0]
+    assert it["tel"] == "5511988887777"     # no formato do WhatsApp: o assistente acha a consulta pelo número
+
+
+def test_tel_paciente():
+    assert CL.tel_paciente("(51) 99268-7358") == "5551992687358"
+    assert CL.tel_paciente("5551992687358") == "5551992687358"
+    assert CL.tel_paciente("123") == ""
+
+
+# ---------- agenda e conversa ligadas ----------
+def test_consulta_liga_para_conversa_e_conversa_lista_consultas(conf):
+    tel = "5511999990000"
+    CL.registrar_msg("teste", tel, "paciente", "Oi")
+    ok, it = CL.AG.reservar("teste", conf, CL.AG.achar_prof(conf, "ana1"), date(2026, 11, 26), "09:00",
+                            {"paciente": "João", "tel": tel})
+    item = CL.painel_agenda_item(it["id"], s=sessao()).body.decode()
+    assert f'/painel/conversa/{tel}' in item and 'id="remarcar"' in item and 'id="cancelar"' in item
+    conversa = CL.painel_conversa(tel, s=sessao()).body.decode()
+    assert "Próximas consultas" in conversa and f'/painel/agenda/item/{it["id"]}#remarcar' in conversa
+
+
+def test_consulta_sem_conversa_oferece_abrir_no_whatsapp(conf):
+    ok, it = CL.AG.reservar("teste", conf, CL.AG.achar_prof(conf, "ana1"), date(2026, 11, 26), "10:00",
+                            {"paciente": "Maria", "tel": "5511988887777"})
+    item = CL.painel_agenda_item(it["id"], s=sessao()).body.decode()
+    assert "https://wa.me/5511988887777" in item
