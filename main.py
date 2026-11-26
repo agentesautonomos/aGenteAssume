@@ -2561,6 +2561,7 @@ def painel_leads(admin: str = Depends(verificar_admin), msg: str = ""):
         <div class="aluno-row">
             <div><strong>{nome}</strong> <span class="badge badge-freemium">{tel}</span>{nicho_lead_badge(l)}{lead_detalhes_html(l)}</div>
             <div style="display:flex;gap:6px">
+                <a href="/admin/leads/editar/{tel}" class="btn">Editar</a>
                 <form method="post" action="/admin/leads/oi/{tel}"><button type="submit" class="btn btn-primary">Enviar isca</button></form>
                 <form method="post" action="/admin/leads/remover/{tel}" onsubmit="return confirm('Remover este lead?')"><button type="submit" class="btn btn-danger">Remover</button></form>
             </div>
@@ -2584,7 +2585,10 @@ def painel_leads(admin: str = Depends(verificar_admin), msg: str = ""):
                 <div><strong>{nome}</strong> <span class="badge badge-freemium">{tel}</span> <span class="badge badge-pendente">aguardando resposta</span>{nicho_lead_badge(l)}</div>
                 <div class="aluno-info">isca enviada ha {ha}{extra_flow}</div>
             </div>
-            <form method="post" action="/admin/leads/remover/{tel}" onsubmit="return confirm('Remover este lead?')"><button type="submit" class="btn btn-danger">Remover</button></form>
+            <div style="display:flex;gap:6px">
+                <a href="/admin/leads/editar/{tel}" class="btn">Editar</a>
+                <form method="post" action="/admin/leads/remover/{tel}" onsubmit="return confirm('Remover este lead?')"><button type="submit" class="btn btn-danger">Remover</button></form>
+            </div>
         </div>"""
     if not rows_env:
         rows_env = "<p style='color:#888;padding:12px 0'>Nenhuma isca aguardando resposta.</p>"
@@ -2751,6 +2755,8 @@ def completar_leads_existentes(itens: list, simular: bool = False) -> dict:
         mudou = False
         for k in LEAD_CAMPOS_COMPLETAVEIS:
             v = str(it.get(k) or "").strip()[:200]
+            if k in (lead.get("editado_manual") or []):
+                continue                      # campo mexido no painel: o scraper nao mexe, nem se foi apagado
             if v and not str(lead.get(k) or "").strip():
                 lead[k] = v
                 mudou = True
@@ -2836,6 +2842,89 @@ async def leads_status(tel: str, status: str = Form(""), admin: str = Depends(ve
     return _redir_leads(f"Status: {FUNIL_STATUS[status][0]}")
 
 
+# Campos que o painel deixa editar. Telefone nao (e a chave do lead e da conversa);
+# IDs do Google so aparecem (sao eles que casam as atualizacoes do scraper).
+LEAD_CAMPOS_EDITAVEIS = (
+    ("nome", "Nome"), ("nicho_texto", "Nicho"), ("cidade", "Cidade"), ("endereco", "Endereço"),
+    ("horario", "Horário de funcionamento"), ("instagram", "Instagram"), ("site", "Site"),
+    ("avaliacao", "Nota no Google"), ("maps_url", "Link do Maps"),
+)
+
+
+def _registro_editavel(tel: str):
+    """Devolve (chave no Redis, dados) do lead: lead:<tel> enquanto nao respondeu, lead_info:<tel> depois."""
+    for v in variantes_telefone(tel):
+        for prefixo in (LEAD_PREFIX, LEAD_INFO_PREFIX):
+            dados = r.get(f"{prefixo}{v}")
+            if dados:
+                try:
+                    return f"{prefixo}{v}", json.loads(dados)
+                except Exception:
+                    pass
+    return None, None
+
+
+@app.get("/admin/leads/editar/{tel}", response_class=HTMLResponse)
+def leads_editar(tel: str, admin: str = Depends(verificar_admin)):
+    chave, lead = _registro_editavel(tel)
+    if not lead:
+        return _redir_leads("Lead nao encontrado")
+    campos = ""
+    for k, rot in LEAD_CAMPOS_EDITAVEIS:
+        v = esc(str(lead.get(k) or ""))
+        if k in ("endereco", "horario", "maps_url"):
+            campo = f'<textarea name="{k}" style="min-height:70px;font-family:inherit">{v}</textarea>'
+        else:
+            campo = f'<input type="text" name="{k}" value="{v}">'
+        campos += f'<label style="display:block;margin:12px 0 4px;font-weight:600">{rot}</label>{campo}'
+    ids = " · ".join(f"{k}: {esc(str(lead[k]))}" for k in ("place_id", "data_id") if lead.get(k)) or "nenhum"
+    editados = ", ".join(dict(LEAD_CAMPOS_EDITAVEIS).get(k, k) for k in (lead.get("editado_manual") or []))
+    conteudo = f"""
+    <div class="card">
+        <h2>Editar lead</h2>
+        <p style="font-size:13px;color:#888;margin-bottom:8px;">Telefone: <strong>{esc(lead.get("telefone") or tel)}</strong> (não muda: é a chave do lead e da conversa).<br>
+        IDs do Google: {ids}<br>
+        Campo que você muda aqui não é mais trocado pelo robô do Maps, nem se ficar vazio.{f"<br>Já editados à mão: {esc(editados)}" if editados else ""}</p>
+        <form method="post" action="/admin/leads/editar/{esc(tel)}">
+            {campos}
+            <br><br>
+            <button type="submit" class="btn btn-primary">Salvar</button>
+            <a href="/admin/leads" class="btn">Cancelar</a>
+        </form>
+    </div>"""
+    return HTMLResponse(base_html("Editar lead", conteudo, "leads"))
+
+
+@app.post("/admin/leads/editar/{tel}")
+async def leads_editar_salvar(tel: str, request: Request, admin: str = Depends(verificar_admin)):
+    form = await request.form()
+    chave, lead = _registro_editavel(tel)
+    if not lead:
+        return _redir_leads("Lead nao encontrado")
+    mudados = []
+    for k, _ in LEAD_CAMPOS_EDITAVEIS:
+        if k not in form:
+            continue
+        novo = str(form.get(k) or "").strip()[:1000 if k == "maps_url" else 200]
+        if novo != str(lead.get(k) or "").strip():
+            if novo:
+                lead[k] = novo
+            else:
+                lead.pop(k, None)
+            mudados.append(k)
+    if not mudados:
+        return _redir_leads("Nada mudou")
+    lead["editado_manual"] = sorted(set(lead.get("editado_manual") or []) | set(mudados))
+    lead["editado_em"] = datetime.now().isoformat()
+    r.set(chave, json.dumps(lead))
+    f = obter_funil(tel)
+    if f and ({"nome", "cidade"} & set(mudados)):
+        f["nome"], f["cidade"] = lead.get("nome", ""), lead.get("cidade", "")
+        salvar_funil(f)
+    return _redir_leads(f"Lead salvo ({len(mudados)} campo" + ("s" if len(mudados) != 1 else "") + " alterado"
+                        + ("s" if len(mudados) != 1 else "") + ")")
+
+
 @app.post("/admin/leads/desbloquear/{tel}")
 async def leads_desbloquear(tel: str, admin: str = Depends(verificar_admin)):
     desbloquear_contato(tel)
@@ -2905,7 +2994,7 @@ def funil_html() -> str:
                 <div><strong>{esc(f.get("nome") or "(sem nome)")}</strong> <span class="badge badge-freemium">{tel}</span> <span class="badge {cls}">{rot}</span></div>
                 <div class="aluno-info">{esc(info)}</div>
             </div>
-            <div style="display:flex;gap:6px;flex-wrap:wrap">{botoes}</div>
+            <div style="display:flex;gap:6px;flex-wrap:wrap"><a href="/admin/leads/editar/{tel}" class="btn">Editar</a>{botoes}</div>
         </div>"""
     if not linhas:
         linhas = "<p style='color:#888;padding:12px 0'>Ninguem respondeu ainda.</p>"
