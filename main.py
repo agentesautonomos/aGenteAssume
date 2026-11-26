@@ -648,6 +648,28 @@ def desbloquear_contato(tel: str):
         r.delete(f"{NAO_CONTATAR_PREFIX}{v}")
 
 
+# humano:<tel>  a equipe da a gente assume assumiu a conversa pelo painel: o assistente
+#               nao responde nem manda toque ate alguem clicar em "Devolver ao assistente".
+HUMANO_PREFIX = "humano:"
+
+
+def em_humano(tel: str) -> dict | None:
+    for v in variantes_telefone(tel):
+        dados = r.get(f"{HUMANO_PREFIX}{v}")
+        if dados:
+            return json.loads(dados)
+    return None
+
+
+def assumir_conversa(tel: str, por: str = "admin"):
+    r.set(f"{HUMANO_PREFIX}{tel}", json.dumps({"por": por, "em": datetime.now().isoformat(timespec="seconds")}))
+
+
+def devolver_conversa(tel: str):
+    for v in variantes_telefone(tel):
+        r.delete(f"{HUMANO_PREFIX}{v}")
+
+
 def eh_prospect(tel: str) -> bool:
     """Numero que veio da captacao (e nao um paciente de clinica, por exemplo)."""
     return bool(obter_funil(tel) or obter_lead(tel) or obter_lead_info(tel) or obter_flow(tel)[1])
@@ -2130,6 +2152,8 @@ def painel_admin(admin: str = Depends(verificar_admin)):
         nicho_badge = nicho_badge_html(obter_nicho(telefone))
         _dem = r.get(f"{DEMORA_PREFIX}{telefone}")
         demora_badge = f'<span class="badge badge-pendente">respondeu o oi em {fmt_duracao(_dem)}</span>' if _dem else ""
+        if em_humano(telefone):
+            demora_badge += '<span class="badge badge-inativo">Com a equipe</span>'
         tk = obter_tokens(telefone)
         tokens_txt = f"{fmt_tokens(tk['total'])} tokens · {fmt_brl(tk['custo_brl'])} (entrada {fmt_tokens(tk['entrada'])} / saida {fmt_tokens(tk['saida'])})"
         badge     = '<span class="badge badge-premium">Premium</span>' if premium else '<span class="badge badge-freemium">Freemium</span>'
@@ -2190,8 +2214,30 @@ def ver_conversa(telefone: str, admin: str = Depends(verificar_admin)):
         else:
             msgs += f'<div class="msg agente"><div class="label">{AGENT_NAME}</div><div class="balao">{texto}</div></div>'
 
+    humano = em_humano(telefone)
+    if humano:
+        caixa_humano = f"""
+    <div class="card" style="margin-bottom:12px;border-left:4px solid #dc2626;">
+        <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;">
+            <div><b>Com a equipe</b> desde {esc(_hora_sp(humano.get("em")))}. O assistente não responde nem manda
+            mensagem para este número até você devolver. Responda pelo WhatsApp da a gente assume.</div>
+            <form method="post" action="/admin/conversa/{telefone}/devolver" style="margin:0">
+                <button type="submit" class="btn btn-success">Devolver ao assistente</button></form>
+        </div>
+    </div>"""
+    else:
+        caixa_humano = f"""
+    <div class="card" style="margin-bottom:12px;">
+        <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;">
+            <div>O assistente está respondendo esta conversa.</div>
+            <form method="post" action="/admin/conversa/{telefone}/assumir" style="margin:0">
+                <button type="submit" class="btn btn-warning">Assumir conversa</button></form>
+        </div>
+    </div>"""
+
     conteudo = f"""
     <a class="back" href="/admin">← Voltar</a>
+    {caixa_humano}
     <div class="card" style="margin-bottom:12px;">
         <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;">
             <div>{status_badge}{expira_txt} {nicho_badge_conv}</div>
@@ -2208,6 +2254,18 @@ def ver_conversa(telefone: str, admin: str = Depends(verificar_admin)):
     </div>"""
 
     return HTMLResponse(base_html(telefone, conteudo))
+
+
+@app.post("/admin/conversa/{telefone}/assumir")
+def admin_assumir_conversa(telefone: str, admin: str = Depends(verificar_admin)):
+    assumir_conversa(telefone, admin or "admin")
+    return RedirectResponse(url=f"/admin/conversa/{telefone}", status_code=303)
+
+
+@app.post("/admin/conversa/{telefone}/devolver")
+def admin_devolver_conversa(telefone: str, admin: str = Depends(verificar_admin)):
+    devolver_conversa(telefone)
+    return RedirectResponse(url=f"/admin/conversa/{telefone}", status_code=303)
 
 
 @app.get("/admin/apagar/{telefone}")
@@ -2227,6 +2285,7 @@ def apagar_historico(telefone: str, admin: str = Depends(verificar_admin)):
         r.delete(f"{FLOW_PREFIX}{tel}")
         r.delete(f"{FUNIL_PREFIX}{tel}")      # nao_contatar fica: "nao quero" e permanente
         r.delete(f"fila:{tel}", f"fila_seq:{tel}", f"fila_t:{tel}")
+        r.delete(f"{HUMANO_PREFIX}{tel}")
     return RedirectResponse(url="/admin")
 
 # ============================================================
@@ -3072,6 +3131,14 @@ async def _responder_apos_espera(telefone: str, seq: int):
             texto = "\n".join(mensagens)
             if len(mensagens) > 1:
                 print(f"AGRUPADAS {len(mensagens)} mensagens de {telefone}")
+            if em_humano(telefone):
+                # a equipe assumiu: so guarda a mensagem para aparecer no painel
+                print(f"COM A EQUIPE {telefone}: assistente nao responde")
+                if eh_nao_quero(texto) and eh_prospect(telefone) and not esta_bloqueado(telefone):
+                    _virar_usuario(telefone)
+                    bloquear_contato(telefone, texto)
+                salvar_mensagem(telefone, "user", texto)
+                return
             if eh_nao_quero(texto) and eh_prospect(telefone) and not esta_bloqueado(telefone):
                 print(f"NAO QUERO de {telefone}: bloqueado")
                 _virar_usuario(telefone)
@@ -3086,6 +3153,9 @@ async def _responder_apos_espera(telefone: str, seq: int):
             else:
                 resposta = await chamar_claude(telefone, texto)
             for i, parte in enumerate(p for p in resposta.split(SEP_MSG) if p.strip()):
+                if em_humano(telefone):
+                    print(f"COM A EQUIPE {telefone}: resposta do assistente nao enviada")
+                    break      # a equipe assumiu enquanto o assistente pensava
                 if i:
                     await asyncio.sleep(2)
                 await enviar_whatsapp(telefone, parte)
@@ -3107,7 +3177,7 @@ async def _verificar_toques():
                 continue
             async with _lock_conversa(tel):
                 fl = json.loads(r.get(chave) or "{}")
-                if fl.get("fase") != "isca" or esta_bloqueado(tel):
+                if fl.get("fase") != "isca" or esta_bloqueado(tel) or em_humano(tel):
                     continue
                 fl["fase"] = "toque24"          # marca antes de enviar: nunca duplica
                 salvar_flow(chave, fl)
@@ -3304,9 +3374,13 @@ async def webhook(request: Request):
 
         if dados.get("type") != "ReceivedCallback":
             return {"status": "ignorado"}
-        if dados.get("fromMe"):
-            return {"status": "ignorado"}
         if dados.get("isGroup"):
+            return {"status": "ignorado"}
+        if dados.get("fromMe"):
+            # conversa assumida pela equipe: o que ela escreve pelo celular entra no historico
+            _tel, _txt = dados.get("phone", ""), (dados.get("text") or {}).get("message", "")
+            if _tel and _txt and via == WA.provedor() and em_humano(_tel):
+                salvar_mensagem(_tel, "assistant", _txt)
             return {"status": "ignorado"}
 
         telefone = dados.get("phone", "")
