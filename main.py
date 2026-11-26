@@ -48,6 +48,10 @@ app.include_router(clinicas_router)
 # ============================================================
 r = redis.from_url(REDIS_URL, decode_responses=True)
 
+# Provedor de WhatsApp do numero principal (Z-API padrao, Evolution por variavel) — ver whatsapp_provedor.py
+import whatsapp_provedor as WA
+WA.usar_redis(r)
+
 # ============================================================
 # AUTENTICACAO ADMIN
 # ============================================================
@@ -1057,13 +1061,18 @@ def bloco_primeiro_contato(telefone: str) -> str:
 # PROCESSAMENTO DE MIDIA
 # ============================================================
 
-async def transcrever_audio(url_audio: str) -> str:
+async def _baixar(url: str) -> bytes:
+    async with httpx.AsyncClient(timeout=60) as http:
+        return (await http.get(url)).content
+
+
+async def transcrever_audio(url_audio: str = "", conteudo: bytes | None = None) -> str:
     if not GROQ_API_KEY:
         return "[Audio recebido, mas GROQ_API_KEY nao configurada]"
     try:
+        if conteudo is None:
+            conteudo = await _baixar(url_audio)
         async with httpx.AsyncClient(timeout=60) as http:
-            r_audio = await http.get(url_audio)
-            conteudo = r_audio.content
             response = await http.post(
                 "https://api.groq.com/openai/v1/audio/transcriptions",
                 headers={"Authorization": f"Bearer {GROQ_API_KEY}"},
@@ -1079,12 +1088,11 @@ async def transcrever_audio(url_audio: str) -> str:
         return "[Erro ao processar audio]"
 
 
-async def extrair_texto_pdf(url_arquivo: str) -> str:
+async def extrair_texto_pdf(url_arquivo: str = "", conteudo: bytes | None = None) -> str:
     try:
         import pdfplumber
-        async with httpx.AsyncClient(timeout=60) as http:
-            r_arquivo = await http.get(url_arquivo)
-            conteudo = r_arquivo.content
+        if conteudo is None:
+            conteudo = await _baixar(url_arquivo)
         with pdfplumber.open(io.BytesIO(conteudo)) as pdf:
             paginas = []
             for i, pagina in enumerate(pdf.pages[:20]):
@@ -1098,12 +1106,11 @@ async def extrair_texto_pdf(url_arquivo: str) -> str:
         return "[Nao foi possivel ler o PDF]"
 
 
-async def extrair_texto_excel(url_arquivo: str) -> str:
+async def extrair_texto_excel(url_arquivo: str = "", conteudo: bytes | None = None) -> str:
     try:
         import openpyxl
-        async with httpx.AsyncClient(timeout=60) as http:
-            r_arquivo = await http.get(url_arquivo)
-            conteudo = r_arquivo.content
+        if conteudo is None:
+            conteudo = await _baixar(url_arquivo)
         wb = openpyxl.load_workbook(io.BytesIO(conteudo), read_only=True, data_only=True)
         linhas_total = []
         for nome_aba in wb.sheetnames[:3]:
@@ -1124,21 +1131,28 @@ async def extrair_texto_excel(url_arquivo: str) -> str:
 
 
 async def processar_midia(dados: dict) -> str | None:
+    """Audio, PDF e planilha. Na Z-API vem um link; na Evolution vem o arquivo em base64."""
+    def _conteudo(m: dict) -> bytes | None:
+        return WA.b64_para_bytes(m["base64"]) if m.get("base64") else None
+
     audio = dados.get("audio", {})
-    if audio and audio.get("audioUrl"):
-        return await transcrever_audio(audio["audioUrl"])
+    if audio:
+        if audio.get("audioUrl") or audio.get("base64"):
+            return await transcrever_audio(audio.get("audioUrl", ""), _conteudo(audio))
+        return "[Audio recebido, mas nao foi possivel baixar]"
     documento = dados.get("document", {})
     if documento:
         url      = documento.get("documentUrl", "")
         filename = documento.get("fileName", "").lower()
         mime     = documento.get("mimeType", "").lower()
-        if not url:
+        conteudo = _conteudo(documento)
+        if not url and conteudo is None:
             return None
         if "pdf" in mime or filename.endswith(".pdf"):
-            return await extrair_texto_pdf(url)
+            return await extrair_texto_pdf(url, conteudo)
         if any(x in mime for x in ["excel", "spreadsheet", "xlsx", "xls"]) or \
            filename.endswith((".xlsx", ".xls")):
-            return await extrair_texto_excel(url)
+            return await extrair_texto_excel(url, conteudo)
         return f"[Arquivo recebido: {filename} — tipo nao suportado para leitura automatica]"
     return None
 
@@ -1209,6 +1223,7 @@ def base_html(titulo: str, conteudo: str, pagina_ativa: str = "") -> str:
         "consultas":   ("Consultas",   "/admin/consultas"),
         "prompt":      ("Prompt",      "/admin/prompt"),
         "arquivos":    ("Arquivos",    "/admin/arquivos"),
+        "whatsapp":    ("WhatsApp",    "/admin/whatsapp"),
     }
     nav_html = ""
     for chave, (label, url) in nav.items():
@@ -1241,21 +1256,8 @@ def base_html(titulo: str, conteudo: str, pagina_ativa: str = "") -> str:
 # ============================================================
 
 async def enviar_whatsapp(telefone: str, mensagem: str):
-    numero_limpo = telefone.replace("+", "").replace("-", "").replace(" ", "")
-    if numero_limpo.startswith("55") and len(numero_limpo) == 12:
-        numero_limpo = numero_limpo[:4] + "9" + numero_limpo[4:]
-    url     = f"https://api.z-api.io/instances/{ZAPI_INSTANCE_ID}/token/{ZAPI_TOKEN}/send-text"
-    headers = {"Content-Type": "application/json", "Client-Token": ZAPI_CLIENT_TOKEN}
-    payload = {"phone": numero_limpo, "message": mensagem}
-    print(f"ENVIANDO para {numero_limpo}")
-    try:
-        async with httpx.AsyncClient(timeout=30) as http:
-            response = await http.post(url, headers=headers, json=payload)
-            print(f"Z-API STATUS: {response.status_code} | {response.text}")
-            return response.status_code < 300
-    except Exception as e:
-        print(f"ERRO ao enviar WhatsApp: {e}")
-        return False
+    """Envia pelo provedor ativo (WHATSAPP_PROVEDOR: zapi ou evolution)."""
+    return await WA.enviar_texto(telefone, mensagem)
 
 
 def obter_link_pagamento(telefone: str) -> str:
@@ -3127,21 +3129,146 @@ async def _loop_toques():
             print(f"ERRO loop toques: {e}")
 
 
+async def _avisar_equipe(texto: str, assunto: str):
+    from clinicas import avisar_equipe_aga
+    await avisar_equipe_aga(texto, assunto)
+
+
+async def _loop_conexao_whatsapp():
+    """De tempos em tempos pergunta a cada provedor se o numero esta conectado (medicao do teste)."""
+    try:
+        minutos = max(1, int(os.environ.get("WHATSAPP_CHECAGEM_MIN", "5")))
+    except ValueError:
+        minutos = 5
+    while True:
+        try:
+            await WA.checar_todos(avisar=_avisar_equipe)
+        except Exception as e:
+            print(f"ERRO checagem whatsapp: {e}")
+        await asyncio.sleep(minutos * 60)
+
+
 @app.on_event("startup")
 async def _iniciar_rotinas():
-    tarefa = asyncio.create_task(_loop_toques())
-    _tarefas_ativas.add(tarefa)
-    tarefa.add_done_callback(_tarefas_ativas.discard)
+    for rotina in (_loop_toques, _loop_conexao_whatsapp):
+        tarefa = asyncio.create_task(rotina())
+        _tarefas_ativas.add(tarefa)
+        tarefa.add_done_callback(_tarefas_ativas.discard)
 
 
 # ============================================================
-# WEBHOOK Z-API (WhatsApp)
+# PAINEL: conexao do WhatsApp (teste Z-API x Evolution)
+# ============================================================
+
+def _hora_sp(iso: str | None) -> str:
+    if not iso:
+        return "—"
+    try:
+        return datetime.fromisoformat(iso).astimezone(WA.TZ_SP).strftime("%d/%m %H:%M")
+    except Exception:
+        return iso
+
+
+@app.get("/admin/whatsapp", response_class=HTMLResponse)
+def painel_whatsapp(admin: str = Depends(verificar_admin), msg: str = "", dias: int = 21):
+    ativo = WA.provedor()
+    nomes = {"zapi": "Z-API", "evolution": "Evolution"}
+    cards = ""
+    configurados = WA.provedores_configurados()
+    for via in ("zapi", "evolution"):
+        if via not in configurados:
+            falta = "ZAPI_INSTANCE_ID e ZAPI_TOKEN" if via == "zapi" else "EVOLUTION_URL, EVOLUTION_API_KEY e EVOLUTION_INSTANCE"
+            cards += f"""<div class="card"><h2>{nomes[via]}</h2>
+                <p style="color:#888">Não configurada. Falta no Railway: {falta}.</p></div>"""
+            continue
+        rs = WA.resumo(via, dias)
+        est = rs.get("estado") or {}
+        estado = est.get("estado", "ainda não checado")
+        cor = "badge-ativo" if estado == WA.ESTADO_OK else "badge-inativo"
+        papel = "responde as mensagens" if via == ativo else "só medindo"
+        disp = "—" if rs.get("disponibilidade") is None else f"{rs['disponibilidade']}%"
+        linhas = "".join(
+            f"<div class='aluno-row'><div>{_hora_sp(q.get('inicio'))} até {_hora_sp(q.get('fim'))}</div>"
+            f"<div>{q.get('minutos', 0)} min · {esc(q.get('motivo', ''))}</div></div>"
+            for q in rs.get("lista_quedas", [])) or "<p style='color:#888'>Nenhuma queda no período.</p>"
+        aberta = rs.get("queda_aberta")
+        aviso = (f"<p class='success' style='background:#fee2e2;color:#dc2626'>Fora do ar desde "
+                 f"{_hora_sp(aberta['inicio'])}.</p>") if aberta else ""
+        cards += f"""
+        <div class="card">
+            <h2>{nomes[via]} <span class="badge {cor}">{esc(estado)}</span>
+                <span class="badge badge-freemium">{papel}</span></h2>
+            {aviso}
+            <div class="stats">
+                <div class="stat"><div class="num">{disp}</div><div class="label">no ar</div></div>
+                <div class="stat"><div class="num">{rs.get('quedas', 0)}</div><div class="label">quedas</div></div>
+                <div class="stat"><div class="num">{rs.get('minutos_fora', 0)}</div><div class="label">minutos fora</div></div>
+                <div class="stat"><div class="num">{rs.get('maior_queda_min', 0)}</div><div class="label">maior queda (min)</div></div>
+                <div class="stat"><div class="num">{rs.get('envios_ok', 0)}</div><div class="label">envios ok</div></div>
+                <div class="stat"><div class="num">{rs.get('envios_falha', 0)}</div><div class="label">envios com falha</div></div>
+                <div class="stat"><div class="num">{rs.get('recebidas', 0)}</div><div class="label">mensagens recebidas</div></div>
+            </div>
+            <p class="total" style="margin-top:12px">Medindo desde {_hora_sp(rs.get('monitorando_desde'))} ·
+                última checagem {_hora_sp(rs.get('ultima_checagem'))} · últimos {dias} dias</p>
+            <h2 style="margin-top:12px">Quedas</h2>
+            {linhas}
+        </div>"""
+    eventos = "".join(
+        f"<div class='aluno-row'><div>{_hora_sp(e.get('quando'))} · {nomes.get(e.get('via'), e.get('via'))}</div>"
+        f"<div>{esc(e.get('estado', ''))} <span style='color:#aaa'>({esc(e.get('origem', ''))})</span></div></div>"
+        for e in WA.ultimos_eventos(40)) or "<p style='color:#888'>Nada ainda.</p>"
+    opcoes = "".join(f'<option value="{v}" {"selected" if v == ativo else ""}>{nomes[v]}</option>' for v in configurados)
+    aviso_msg = f'<div class="success">{esc(msg)}</div>' if msg else ""
+    conteudo = f"""
+    {aviso_msg}
+    <div class="card">
+        <h2>Quem responde agora: {nomes[ativo]}</h2>
+        <p style="font-size:14px;color:#555">Para trocar, mude WHATSAPP_PROVEDOR no Railway (zapi ou evolution).
+        As clínicas não mudam: cada uma segue na sua instância da Z-API.</p>
+    </div>
+    {cards}
+    <div class="card">
+        <h2>Mandar uma mensagem de teste</h2>
+        <form method="post" action="/admin/whatsapp/teste" style="display:flex;gap:8px;flex-wrap:wrap">
+            <input type="text" name="telefone" placeholder="Seu número, ex. 51 99999-8888" style="flex:1;min-width:200px" required>
+            <select name="via" style="padding:10px;border-radius:8px;border:1px solid #ddd">{opcoes}</select>
+            <button class="btn btn-primary">Enviar</button>
+        </form>
+    </div>
+    <div class="card"><h2>Últimas mudanças de conexão</h2>{eventos}</div>
+    """
+    return base_html("WhatsApp", conteudo, "whatsapp")
+
+
+@app.post("/admin/whatsapp/teste")
+async def whatsapp_teste(telefone: str = Form(...), via: str = Form("zapi"), admin: str = Depends(verificar_admin)):
+    via = "evolution" if via == "evolution" else "zapi"
+    quando = agora_brasilia().strftime("%d/%m %H:%M")
+    ok = await WA.enviar_texto(telefone, f"Mensagem de teste do painel ({via}, {quando}).", via=via)
+    texto = "Enviada. Confira no celular." if ok else "Não foi. Veja o estado da conexão abaixo."
+    return RedirectResponse(url=f"/admin/whatsapp?msg={quote(texto)}", status_code=303)
+
+
+# ============================================================
+# WEBHOOK do WhatsApp (Z-API e Evolution chegam aqui)
 # ============================================================
 
 @app.post("/webhook")
 async def webhook(request: Request):
     try:
         dados = await request.json()
+
+        via = "zapi"
+        if WA.eh_evolution(dados):
+            via = "evolution"
+            token = os.environ.get("EVOLUTION_WEBHOOK_TOKEN", "")
+            if token and not secrets.compare_digest(request.query_params.get("token", ""), token):
+                return {"status": "ignorado"}
+            WA.registrar_webhook_evolution(dados)
+            # so baixa audio/arquivo se for este provedor que responde
+            dados = await WA.evolution_para_zapi(dados, com_midia=(WA.provedor() == "evolution"))
+            if dados is None:
+                return {"status": "ok"}
 
         if dados.get("type") != "ReceivedCallback":
             return {"status": "ignorado"}
@@ -3153,6 +3280,11 @@ async def webhook(request: Request):
         telefone = dados.get("phone", "")
         if not telefone:
             return {"status": "ignorado"}
+
+        WA.contar_recebida(via)
+        if via != WA.provedor():
+            # o mesmo numero ligado nos dois provedores: o outro so conta, para comparar; nao responde duas vezes
+            return {"status": "so_medicao"}
 
         texto_midia = await processar_midia(dados)
         if texto_midia:

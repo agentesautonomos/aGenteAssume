@@ -53,6 +53,39 @@ Agente de IA para WhatsApp construído com Claude (Anthropic), FastAPI, Redis e 
 
 ---
 
+## WhatsApp: Z-API ou Evolution API (teste em paralelo)
+
+O número principal (agente de vendas) pode falar pela Z-API (padrão) ou pela Evolution API
+(open source, roda num servidor nosso). Troca por variável, sem mexer no código. As clínicas
+continuam na Z-API, cada uma com a sua instância. Código em `whatsapp_provedor.py`.
+
+| Variável | Descrição |
+|----------|-----------|
+| WHATSAPP_PROVEDOR | `zapi` (padrão) ou `evolution`: quem envia e quem tem as mensagens respondidas |
+| EVOLUTION_URL | Endereço do servidor da Evolution (ex.: https://evolution-xxxx.up.railway.app) |
+| EVOLUTION_API_KEY | `AUTHENTICATION_API_KEY` do servidor da Evolution |
+| EVOLUTION_INSTANCE | Nome da instância criada na Evolution |
+| EVOLUTION_WEBHOOK_TOKEN | Opcional. Se preenchido, o webhook da Evolution precisa vir com `?token=<valor>` |
+| WHATSAPP_CHECAGEM_MIN | De quantos em quantos minutos checar a conexão (padrão 5) |
+
+**Webhook da Evolution:** apontar a instância para `{BASE_URL}/webhook?token=<EVOLUTION_WEBHOOK_TOKEN>`
+com os eventos `MESSAGES_UPSERT`, `CONNECTION_UPDATE` e `QRCODE_UPDATED`. Ligar "Webhook Base64"
+para áudio e PDF chegarem junto (se não ligar, o servidor busca na Evolution).
+
+**Medição:** `/admin/whatsapp` mostra, para cada provedor configurado: se está conectado, quantas
+quedas, minutos fora, maior queda, % no ar, envios ok e com falha e mensagens recebidas. A conexão
+é checada a cada 5 minutos e também pelos avisos da própria Evolution. Quando um provedor cai,
+a equipe recebe aviso (AVISO_EMAIL / AVISO_WHATSAPP) uma vez e outro quando volta.
+
+Se o provedor que **não** está ativo receber uma mensagem, ela só é contada (não é respondida),
+para dar para comparar os dois sem responder duas vezes.
+
+**Subir a Evolution no Railway:** template `evolution-api-whatsapp` (Evolution v2.3.7 + Postgres +
+Redis, cerca de US$ 5 a 10 por mês). Depois: abrir `<domínio>/manager`, criar a instância, ler o
+QR Code com o WhatsApp do número de teste e preencher as variáveis acima no serviço do agente.
+
+---
+
 ## Deploy
 
 Start Command:
