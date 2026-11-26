@@ -531,20 +531,142 @@ def importar_leads(texto: str) -> dict:
     return res
 
 
-def adicionar_lead(nome: str, tel: str, nicho_txt: str = "", extra: dict | None = None) -> str:
+# ------------------------------------------------------------
+# FUNIL DE VENDAS e ORIGEM DO CONTATO (LGPD)
+#   funil:<tel>        status atual, historico de mudancas e origem do contato.
+#                      Sobrevive a resposta do lead (o lead:<tel> e apagado quando ele responde).
+#   nao_contatar:<tel> quem disse "nao quero": bloqueio permanente de envio. Nao e apagado
+#                      por "Zerar banco" nem por "Apagar conversa"; so pelo botao "Desbloquear".
+# ------------------------------------------------------------
+FUNIL_PREFIX       = "funil:"
+NAO_CONTATAR_PREFIX = "nao_contatar:"
+FUNIL_STATUS = {            # status: (rotulo no painel, classe do badge)
+    "pendente":  ("Pendente", "badge-freemium"),
+    "enviado":   ("Abordado", "badge-pendente"),
+    "respondeu": ("Respondeu", "badge-premium"),
+    "nao_quero": ("Não quero", "badge-inativo"),
+    "testando":  ("Testando", "badge-premium"),
+    "pagou":     ("Pagou", "badge-ativo"),
+}
+# status automaticos so andam para frente; os manuais (botoes do painel) podem ir para qualquer um
+_FUNIL_ORDEM = {"pendente": 0, "enviado": 1, "respondeu": 2, "testando": 3, "pagou": 4, "nao_quero": 5}
+ORIGEM_MAPS   = "Google Maps (perfil público da empresa)"
+ORIGEM_MANUAL = "Importação manual no painel"
+MSG_NAO_QUERO = "Tudo certo, a gente não vai mais te mandar mensagem. Obrigado pelo retorno."
+
+# Mensagem inteira (depois de tirar acento e pontuacao) que vale como "nao quero"
+_RE_NAO_QUERO_INTEIRA = re.compile(
+    r"^(pare|parar|para|sair|stop|remover|remova|descadastrar|nao quero|nao tenho interesse|sem interesse)"
+    r"( obrigad[oa]| valeu)?$")
+# Trechos sem ambiguidade em qualquer parte da mensagem
+_RE_NAO_QUERO_TRECHO = re.compile(
+    r"\b(nao tenho interesse|nao temos interesse|nao quero receber|nao me mande|nao mande mais|nao mandem mais"
+    r"|pare de mandar|parem de mandar|pare de me mandar|parem de me mandar|para de mandar|nao me chame mais"
+    r"|tira meu numero|tire meu numero|tirar meu numero|remova meu numero|remover meu numero|apague meu numero"
+    r"|descadastr\w*|nao entre mais em contato|nao entrem mais em contato)\b")
+
+
+def eh_nao_quero(texto: str) -> bool:
+    t = re.sub(r"[^a-z0-9 ]+", " ", _sem_acento(texto or "")).split()
+    t = " ".join(t)
+    return bool(t) and bool(_RE_NAO_QUERO_INTEIRA.match(t) or _RE_NAO_QUERO_TRECHO.search(t))
+
+
+def obter_funil(tel: str) -> dict | None:
+    for v in variantes_telefone(tel):
+        dados = r.get(f"{FUNIL_PREFIX}{v}")
+        if dados:
+            try:
+                return json.loads(dados)
+            except Exception:
+                return None
+    return None
+
+
+def origem_do_lead(lead: dict, via: str = "") -> dict:
+    """Registro de onde veio o contato (LGPD): fonte, link publico e quando foi coletado."""
+    do_maps = bool(lead.get("maps_url") or lead.get("place_id") or lead.get("data_id")) or via == "api"
+    o = {"fonte": ORIGEM_MAPS if do_maps else ORIGEM_MANUAL,
+         "coletado_em": lead.get("coletado_em") or lead.get("importado_em") or datetime.now().isoformat()}
+    if lead.get("maps_url"):
+        o["link"] = lead["maps_url"]
+    return o
+
+
+def _funil_novo(tel: str) -> dict:
+    """Cria o registro do funil a partir do lead (ou do que sobrou dele), para leads antigos."""
+    lead = obter_lead(tel) or obter_lead_info(tel) or {}
+    tel = lead.get("telefone") or tel
+    st = lead.get("status") if lead.get("status") in FUNIL_STATUS else "pendente"
+    em = lead.get("enviado_em") if st == "enviado" else lead.get("importado_em")
+    return {"telefone": tel, "nome": lead.get("nome", ""), "cidade": lead.get("cidade", ""),
+            "status": st, "historico": [{"status": st, "em": em or datetime.now().isoformat()}],
+            "origem": origem_do_lead(lead)}
+
+
+def salvar_funil(f: dict):
+    r.set(f"{FUNIL_PREFIX}{f['telefone']}", json.dumps(f))
+
+
+def mudar_status(tel: str, status: str, motivo: str = "", forcar: bool = False) -> dict:
+    """Muda o status do funil e guarda a data. Sem forcar, so anda para frente
+    (ex: uma resposta nova nao tira ninguem de 'pagou')."""
+    if status not in FUNIL_STATUS:
+        raise ValueError(status)
+    f = obter_funil(tel) or _funil_novo(tel)
+    atual = f.get("status", "pendente")
+    if atual != status and (forcar or _FUNIL_ORDEM[status] > _FUNIL_ORDEM.get(atual, 0)):
+        f["status"] = status
+        item = {"status": status, "em": datetime.now().isoformat()}
+        if motivo:
+            item["motivo"] = motivo[:200]
+        f.setdefault("historico", []).append(item)
+        salvar_funil(f)
+    elif not obter_funil(tel):
+        salvar_funil(f)
+    return f
+
+
+def esta_bloqueado(tel: str) -> bool:
+    return any(r.get(f"{NAO_CONTATAR_PREFIX}{v}") for v in variantes_telefone(tel))
+
+
+def bloquear_contato(tel: str, motivo: str):
+    """'Nao quero': nunca mais recebe mensagem iniciada pelo sistema (isca, toque de 24h)."""
+    r.set(f"{NAO_CONTATAR_PREFIX}{tel}", json.dumps({"em": datetime.now().isoformat(), "motivo": motivo[:200]}))
+    mudar_status(tel, "nao_quero", motivo, forcar=True)
+    for v in variantes_telefone(tel):
+        r.delete(f"{FLOW_PREFIX}{v}")          # para o toque de 24h
+
+
+def desbloquear_contato(tel: str):
+    for v in variantes_telefone(tel):
+        r.delete(f"{NAO_CONTATAR_PREFIX}{v}")
+
+
+def eh_prospect(tel: str) -> bool:
+    """Numero que veio da captacao (e nao um paciente de clinica, por exemplo)."""
+    return bool(obter_funil(tel) or obter_lead(tel) or obter_lead_info(tel) or obter_flow(tel)[1])
+
+
+def adicionar_lead(nome: str, tel: str, nicho_txt: str = "", extra: dict | None = None, via: str = "") -> str:
     """Cria um lead pendente. Devolve 'ok', 'duplicado' ou 'invalido' (inclui telefone fixo)."""
     resto = tel[2:] if tel.startswith("55") else tel
     if (len(resto) == 10 and resto[2] in "2345") or (len(resto) == 11 and resto[2] != "9"):
         return "invalido"   # telefone fixo nao recebe WhatsApp
     ja_usuario = any(r.get(f"historico:{v}") for v in variantes_telefone(tel))
-    if obter_lead(tel) or ja_usuario:
-        return "duplicado"
+    if obter_lead(tel) or ja_usuario or esta_bloqueado(tel):
+        return "duplicado"   # quem disse "nao quero" nunca volta para a lista
     lead = {"telefone": tel, "nome": (nome or "")[:80], "nicho_texto": (nicho_txt or "")[:60],
             "status": "pendente", "importado_em": datetime.now().isoformat()}
     for k, v in (extra or {}).items():
         if v not in (None, ""):
             lead[k] = str(v)[:1000 if k == "maps_url" else 200]   # link do Maps inteiro: os IDs do Google ficam no fim
+    lead["origem"] = origem_do_lead(lead, via)["fonte"]
     salvar_lead(lead)
+    salvar_funil({"telefone": tel, "nome": lead["nome"], "cidade": lead.get("cidade", ""), "status": "pendente",
+                  "historico": [{"status": "pendente", "em": lead["importado_em"]}],
+                  "origem": origem_do_lead(lead, via)})
     return "ok"
 
 
@@ -632,6 +754,7 @@ def processar_retorno_lead(telefone: str):
     info["respondeu_em"] = datetime.now().isoformat()
     r.set(f"{LEAD_INFO_PREFIX}{telefone}", json.dumps(info))
     apagar_lead(telefone)   # so apaga depois de copiar tudo
+    mudar_status(telefone, "respondeu")
     pend = {"nome": lead.get("nome", ""), "nicho_texto": lead.get("nicho_texto", ""), "cidade": lead.get("cidade", "")}
     if lead.get("status") == "enviado" and lead.get("enviado_em"):
         try:
@@ -1312,6 +1435,8 @@ async def pagamento_obrigado(external_reference: str = "", collection_status: st
             "expira": (datetime.now() + timedelta(days=35)).isoformat()
         }
         salvar_assinatura(external_reference, dados)
+        if obter_funil(external_reference):
+            mudar_status(external_reference, "pagou", "Mercado Pago")
         await enviar_whatsapp(external_reference,
             "Seu acesso Premium esta ativo! 🎉\n\nBem-vindo ao PrimeiraMente Premium. Pode me contar agora o que esta acontecendo com seu filho — estou aqui para ajudar com orientacoes completas 🧠💙")
 
@@ -2098,6 +2223,7 @@ def apagar_historico(telefone: str, admin: str = Depends(verificar_admin)):
         r.delete(f"{CONSULTA_PREFIX}{tel}")
         r.delete(f"{LEAD_PREFIX}{tel}")
         r.delete(f"{FLOW_PREFIX}{tel}")
+        r.delete(f"{FUNIL_PREFIX}{tel}")      # nao_contatar fica: "nao quero" e permanente
         r.delete(f"fila:{tel}", f"fila_seq:{tel}", f"fila_t:{tel}")
     return RedirectResponse(url="/admin")
 
@@ -2470,6 +2596,8 @@ def painel_leads(admin: str = Depends(verificar_admin), msg: str = ""):
         <div class="stat"><div class="num">{len(enviados)}</div><div class="label">Aguardando resposta</div></div>
     </div>
 
+    {funil_html()}
+
     <div class="card">
         <h2>Importar leads</h2>
         <p style="font-size:13px;color:#888;margin-bottom:12px;">
@@ -2536,6 +2664,8 @@ async def leads_oi(tel: str, admin: str = Depends(verificar_admin)):
     lead = obter_lead(tel)
     if not lead or lead.get("status") == "enviado":
         return _redir_leads("Lead nao encontrado ou a isca ja foi enviada")
+    if esta_bloqueado(lead["telefone"]):
+        return _redir_leads("Este numero pediu para nao receber mensagens. Nada foi enviado.")
     texto_isca = montar_oi_texto(lead)
     ok = await enviar_whatsapp(lead["telefone"], texto_isca)
     if not ok:
@@ -2543,6 +2673,7 @@ async def leads_oi(tel: str, admin: str = Depends(verificar_admin)):
     lead["status"]     = "enviado"
     lead["enviado_em"] = datetime.now().isoformat()
     salvar_lead(lead)
+    mudar_status(lead["telefone"], "enviado")
     salvar_flow(f"{FLOW_PREFIX}{lead['telefone']}", {
         "fase": "isca", "enviado_em": lead["enviado_em"], "enviado_br": agora_brasilia().isoformat(),
         "isca_texto": texto_isca, "tempos": [], "trocas": 0})
@@ -2551,7 +2682,7 @@ async def leads_oi(tel: str, admin: str = Depends(verificar_admin)):
 
 
 LEADS_API_KEY = os.environ.get("LEADS_API_KEY", "")
-LEAD_CAMPOS_EXTRAS = ("cidade", "endereco", "site", "instagram", "horario", "avaliacao", "maps_url",
+LEAD_CAMPOS_EXTRAS = ("cidade", "endereco", "site", "instagram", "horario", "avaliacao", "maps_url", "coletado_em",
                       "place_id", "data_id")
 LEAD_CAMPOS_COMPLETAVEIS = ("horario", "instagram", "place_id", "data_id")
 # IDs do Google dentro do link do Maps. So valem inteiros: o delimitador depois do ID garante que
@@ -2650,7 +2781,7 @@ async def api_leads(request: Request):
             continue
         resultado = adicionar_lead(
             str(it.get("nome") or ""), tel, str(it.get("nicho") or "dentista"),
-            {k: it.get(k) for k in LEAD_CAMPOS_EXTRAS})
+            {k: it.get(k) for k in LEAD_CAMPOS_EXTRAS}, via="api")
         res[{"ok": "importados", "duplicado": "duplicados"}.get(resultado, "invalidos")] += 1
     print(f"API LEADS: {res}")
     return res
@@ -2674,7 +2805,8 @@ async def zerar_banco(admin: str = Depends(verificar_admin)):
     """Apaga leads, usuarios, conversas, fluxos e contadores (inclusive o total de tokens).
     Mantem prompt, arquivos de nicho, textos e configuracoes, agenda e assinaturas."""
     padroes = ["historico:*", "nicho:*", "contato_pendente:*", "demora:*", "lead_info:*", "lead:*",
-               "pitch_enviado:*", "tokens:*", "consulta:*", "flow:*", "fila:*", "fila_seq:*", "fila_t:*"]
+               "pitch_enviado:*", "tokens:*", "consulta:*", "flow:*", "fila:*", "fila_seq:*", "fila_t:*",
+               "funil:*"]   # nao_contatar:* fica: "nao quero" e permanente
     total = 0
     for padrao in padroes:
         for chave in r.keys(padrao):
@@ -2688,7 +2820,102 @@ async def leads_remover(tel: str, admin: str = Depends(verificar_admin)):
     apagar_lead(tel)
     for v in variantes_telefone(tel):
         r.delete(f"{FLOW_PREFIX}{v}")
+        r.delete(f"{FUNIL_PREFIX}{v}")
     return _redir_leads("Lead removido")
+
+
+@app.post("/admin/leads/status/{tel}")
+async def leads_status(tel: str, status: str = Form(""), admin: str = Depends(verificar_admin)):
+    """Muda o status do funil na mao (ex: 'testando', 'pagou', 'nao_quero')."""
+    if status not in FUNIL_STATUS:
+        return _redir_leads("Status invalido")
+    if status == "nao_quero":
+        bloquear_contato(tel, "marcado no painel")
+    else:
+        mudar_status(tel, status, "marcado no painel", forcar=True)
+    return _redir_leads(f"Status: {FUNIL_STATUS[status][0]}")
+
+
+@app.post("/admin/leads/desbloquear/{tel}")
+async def leads_desbloquear(tel: str, admin: str = Depends(verificar_admin)):
+    desbloquear_contato(tel)
+    mudar_status(tel, "respondeu", "desbloqueado no painel", forcar=True)
+    return _redir_leads("Numero desbloqueado")
+
+
+def listar_funil() -> list:
+    """Todos os contatos do funil, incluindo leads antigos (de antes do funil existir)."""
+    itens, vistos = [], set()
+    for chave in r.keys(f"{FUNIL_PREFIX}*"):
+        try:
+            f = json.loads(r.get(chave) or "{}")
+        except Exception:
+            continue
+        if f.get("telefone"):
+            itens.append(f)
+            vistos.add(f["telefone"])
+    for lead in listar_leads():
+        if lead.get("telefone") and lead["telefone"] not in vistos:
+            itens.append(_funil_novo(lead["telefone"]))
+            vistos.add(lead["telefone"])
+    for chave in r.keys(f"{NAO_CONTATAR_PREFIX}*"):   # bloqueados de antes de um "Zerar banco"
+        tel = chave[len(NAO_CONTATAR_PREFIX):]
+        if tel not in vistos:
+            itens.append({"telefone": tel, "status": "nao_quero", "historico": [], "origem": {}})
+    return itens
+
+
+def funil_html() -> str:
+    itens = listar_funil()
+    cont = {k: 0 for k in FUNIL_STATUS}
+    for f in itens:
+        cont[f.get("status", "pendente")] = cont.get(f.get("status", "pendente"), 0) + 1
+    stats = "".join(f'<div class="stat"><div class="num">{cont[k]}</div><div class="label">{rot}</div></div>'
+                    for k, (rot, _) in FUNIL_STATUS.items())
+    # so quem ja passou da isca aparece na lista (pendentes e abordados ja estao nas listas abaixo)
+    ativos = [f for f in itens if f.get("status") in ("respondeu", "testando", "pagou", "nao_quero")]
+    ativos.sort(key=lambda f: (f.get("historico") or [{}])[-1].get("em", ""), reverse=True)
+    linhas = ""
+    for f in ativos[:200]:
+        tel = esc(f.get("telefone", ""))
+        st = f.get("status", "pendente")
+        rot, cls = FUNIL_STATUS.get(st, (st, ""))
+        ult = (f.get("historico") or [{}])[-1].get("em", "")[:16].replace("T", " ")
+        primeiro = next((h.get("em", "") for h in f.get("historico", []) if h.get("status") == "enviado"), "")
+        origem = (f.get("origem") or {}).get("fonte", "")
+        info = " · ".join(x for x in (f"desde {ult}" if ult else "",
+                                      f"1º contato {primeiro[:10]}" if primeiro else "",
+                                      f"origem: {origem}" if origem else "") if x)
+        botoes = "".join(
+            f'<form method="post" action="/admin/leads/status/{tel}"><input type="hidden" name="status" value="{k}">'
+            f'<button type="submit" class="btn">{FUNIL_STATUS[k][0]}</button></form>'
+            for k in ("testando", "pagou") if k != st)
+        if st == "nao_quero":
+            botoes = (f'<form method="post" action="/admin/leads/desbloquear/{tel}" '
+                      f'onsubmit="return confirm(\'Desbloquear? O sistema volta a poder mandar mensagem.\')">'
+                      f'<button type="submit" class="btn">Desbloquear</button></form>')
+        else:
+            botoes += (f'<form method="post" action="/admin/leads/status/{tel}" '
+                       f'onsubmit="return confirm(\'Marcar como não quero? O número não recebe mais mensagens.\')">'
+                       f'<input type="hidden" name="status" value="nao_quero">'
+                       f'<button type="submit" class="btn btn-danger">Não quero</button></form>')
+        linhas += f"""
+        <div class="aluno-row">
+            <div>
+                <div><strong>{esc(f.get("nome") or "(sem nome)")}</strong> <span class="badge badge-freemium">{tel}</span> <span class="badge {cls}">{rot}</span></div>
+                <div class="aluno-info">{esc(info)}</div>
+            </div>
+            <div style="display:flex;gap:6px;flex-wrap:wrap">{botoes}</div>
+        </div>"""
+    if not linhas:
+        linhas = "<p style='color:#888;padding:12px 0'>Ninguem respondeu ainda.</p>"
+    return f"""
+    <div class="card">
+        <h2>Funil</h2>
+        <div class="stats">{stats}</div>
+        <p style="font-size:13px;color:#888;margin:10px 0 8px;">Quem responde "não quero", "pare", "sem interesse" e parecidos é bloqueado na hora e nunca mais recebe mensagem do sistema. "Testando" e "Pagou" são marcados aqui.</p>
+        {linhas}
+    </div>"""
 
 
 @app.post("/admin/leads/pitch")
@@ -2754,6 +2981,14 @@ async def _responder_apos_espera(telefone: str, seq: int):
             texto = "\n".join(mensagens)
             if len(mensagens) > 1:
                 print(f"AGRUPADAS {len(mensagens)} mensagens de {telefone}")
+            if eh_nao_quero(texto) and eh_prospect(telefone) and not esta_bloqueado(telefone):
+                print(f"NAO QUERO de {telefone}: bloqueado")
+                _virar_usuario(telefone)
+                bloquear_contato(telefone, texto)
+                salvar_mensagem(telefone, "user", texto)
+                salvar_mensagem(telefone, "assistant", MSG_NAO_QUERO)
+                await enviar_whatsapp(telefone, MSG_NAO_QUERO)
+                return
             msgs_fluxo = fluxo_resposta(telefone, texto, chegada)
             if msgs_fluxo is not None:
                 resposta = SEP_MSG.join(msgs_fluxo)
@@ -2781,7 +3016,7 @@ async def _verificar_toques():
                 continue
             async with _lock_conversa(tel):
                 fl = json.loads(r.get(chave) or "{}")
-                if fl.get("fase") != "isca":
+                if fl.get("fase") != "isca" or esta_bloqueado(tel):
                     continue
                 fl["fase"] = "toque24"          # marca antes de enviar: nunca duplica
                 salvar_flow(chave, fl)
