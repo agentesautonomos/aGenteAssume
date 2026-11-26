@@ -3282,6 +3282,10 @@ def painel_whatsapp(admin: str = Depends(verificar_admin), msg: str = "", dias: 
                 última checagem {_hora_sp(rs.get('ultima_checagem'))} · últimos {dias} dias</p>
             <h2 style="margin-top:12px">Quedas</h2>
             {linhas}
+            <form method="post" action="/admin/whatsapp/zerar/{via}" style="margin-top:12px"
+                  onsubmit="return confirm('Zerar a medição da {nomes[via]}? Quedas, eventos e contagens dela recomeçam do zero.')">
+                <button class="btn btn-warning">Zerar medição da {nomes[via]}</button>
+            </form>
         </div>"""
     eventos = "".join(
         f"<div class='aluno-row'><div>{_hora_sp(e.get('quando'))} · {nomes.get(e.get('via'), e.get('via'))}</div>"
@@ -3340,6 +3344,15 @@ def whatsapp_conectar(admin: str = Depends(verificar_admin)):
     tick();
     </script>"""
     return base_html("Conectar WhatsApp", conteudo, "whatsapp")
+
+
+@app.post("/admin/whatsapp/zerar/{via}")
+def whatsapp_zerar(via: str, admin: str = Depends(verificar_admin)):
+    if via not in ("zapi", "evolution"):
+        raise HTTPException(status_code=404)
+    WA.zerar(via)
+    return RedirectResponse(url=f"/admin/whatsapp?msg={quote('Medição zerada. Recomeça a contar a partir de agora.')}",
+                            status_code=303)
 
 
 @app.post("/admin/whatsapp/teste")

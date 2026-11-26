@@ -408,6 +408,23 @@ async def qr_evolution() -> dict:
         return {"erro": str(e)}
 
 
+def zerar(via: str) -> None:
+    """Apaga a medicao de um provedor (estado, quedas, eventos e contagens) e recomeca do zero."""
+    if R is None:
+        return
+    for k in ("estado", "desde", "ultima_checagem", "queda_aberta"):
+        R.delete(f"{PFX}{k}:{via}")
+    for lista in ("quedas", "eventos"):
+        manter = [x for x in R.lrange(f"{PFX}{lista}", 0, -1) if json.loads(x).get("via") != via]
+        R.delete(f"{PFX}{lista}")
+        if manter:
+            R.rpush(f"{PFX}{lista}", *manter)
+    for k in R.scan_iter(f"{PFX}contagem:*"):
+        campos = [c for c in R.hkeys(k) if c.startswith(f"{via}:")]
+        if campos:
+            R.hdel(k, *campos)
+
+
 def ultimos_eventos(n: int = 50) -> list[dict]:
     if R is None:
         return []
