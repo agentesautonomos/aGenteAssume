@@ -295,3 +295,19 @@ def test_tela_de_qr(m, http_falso):
     respostas["connectionState"] = (200, {"instance": {"state": "open"}})
     assert c.get("/admin/whatsapp/qr", auth=ADMIN).json() == {"conectado": True}
     assert c.get("/admin/whatsapp/qr").status_code == 401
+
+
+def test_zerar_medicao_so_do_provedor_escolhido(m):
+    W = m.WA
+    W.registrar_estado("evolution", "conectado")
+    W.registrar_estado("evolution", "caiu")
+    W.registrar_estado("zapi", "conectado")
+    W.contar_recebida("evolution")
+    W.contar_recebida("zapi")
+    r = TestClient(m.app).post("/admin/whatsapp/zerar/evolution", auth=ADMIN, follow_redirects=False)
+    assert r.status_code == 303
+    rs = W.resumo("evolution")
+    assert rs["quedas"] == 0 and rs["recebidas"] == 0 and rs["estado"] == {} and rs["queda_aberta"] is None
+    assert [e["via"] for e in W.ultimos_eventos()] == ["zapi"]
+    assert W.resumo("zapi")["recebidas"] == 1
+    assert "Zerar medição da Evolution" in TestClient(m.app).get("/admin/whatsapp", auth=ADMIN).text
