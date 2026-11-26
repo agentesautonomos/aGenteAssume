@@ -3227,6 +3227,7 @@ def painel_whatsapp(admin: str = Depends(verificar_admin), msg: str = "", dias: 
         As clínicas não mudam: cada uma segue na sua instância da Z-API.</p>
     </div>
     {cards}
+    {'<div class="card"><h2>Conectar o número na Evolution</h2><a class="btn btn-primary" href="/admin/whatsapp/conectar">Mostrar o QR Code</a></div>' if "evolution" in configurados else ''}
     <div class="card">
         <h2>Mandar uma mensagem de teste</h2>
         <form method="post" action="/admin/whatsapp/teste" style="display:flex;gap:8px;flex-wrap:wrap">
@@ -3238,6 +3239,37 @@ def painel_whatsapp(admin: str = Depends(verificar_admin), msg: str = "", dias: 
     <div class="card"><h2>Últimas mudanças de conexão</h2>{eventos}</div>
     """
     return base_html("WhatsApp", conteudo, "whatsapp")
+
+
+@app.get("/admin/whatsapp/qr")
+async def whatsapp_qr_json(admin: str = Depends(verificar_admin)):
+    return await WA.qr_evolution()
+
+
+@app.get("/admin/whatsapp/conectar", response_class=HTMLResponse)
+def whatsapp_conectar(admin: str = Depends(verificar_admin)):
+    conteudo = """
+    <div class="card" style="text-align:center">
+        <h2>Conectar o WhatsApp na Evolution</h2>
+        <p style="font-size:14px;color:#555">Abra esta página no computador. No celular: WhatsApp → Aparelhos conectados →
+        Conectar um aparelho → aponte para o QR Code. Ele se renova sozinho.</p>
+        <img id="qr" alt="" style="width:300px;height:300px;margin:16px auto;display:block">
+        <p id="st">Gerando o QR Code…</p>
+    </div>
+    <script>
+    async function tick() {
+        try {
+            const d = await (await fetch('/admin/whatsapp/qr')).json();
+            const qr = document.getElementById('qr'), st = document.getElementById('st');
+            if (d.conectado) { qr.style.display = 'none'; st.innerHTML = '<b>Conectado!</b> Pode fechar esta página.'; return; }
+            if (d.erro) { st.textContent = 'Erro: ' + d.erro; }
+            else { if (d.qr) qr.src = d.qr; st.textContent = 'Aguardando a leitura (' + d.estado + ')…'; }
+        } catch (e) { document.getElementById('st').textContent = 'Erro: ' + e; }
+        setTimeout(tick, 20000);
+    }
+    tick();
+    </script>"""
+    return base_html("Conectar WhatsApp", conteudo, "whatsapp")
 
 
 @app.post("/admin/whatsapp/teste")

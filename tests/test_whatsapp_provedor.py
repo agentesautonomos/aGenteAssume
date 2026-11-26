@@ -281,3 +281,17 @@ def test_audio_da_evolution_e_transcrito_sem_baixar_link(m, monkeypatch):
     dados = {"audio": {"base64": base64.b64encode(b"OGG").decode()}}
     assert asyncio.run(m.processar_midia(dados)) == "[Audio transcrito]: oi"
     assert recebido == {"url": "", "conteudo": b"OGG"}
+
+
+def test_tela_de_qr(m, http_falso):
+    _, respostas = http_falso
+    respostas["connectionState"] = (200, {"instance": {"state": "connecting"}})
+    respostas["instance/connect"] = (200, {"base64": "data:image/png;base64,AAA"})
+    c = TestClient(m.app)
+    assert "Mostrar o QR Code" in c.get("/admin/whatsapp", auth=ADMIN).text
+    assert "Conectar o WhatsApp na Evolution" in c.get("/admin/whatsapp/conectar", auth=ADMIN).text
+    assert c.get("/admin/whatsapp/qr", auth=ADMIN).json() == {"conectado": False, "qr": "data:image/png;base64,AAA",
+                                                             "estado": "connecting"}
+    respostas["connectionState"] = (200, {"instance": {"state": "open"}})
+    assert c.get("/admin/whatsapp/qr", auth=ADMIN).json() == {"conectado": True}
+    assert c.get("/admin/whatsapp/qr").status_code == 401

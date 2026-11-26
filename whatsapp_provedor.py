@@ -390,6 +390,24 @@ def resumo(via: str, dias: int = 21) -> dict:
     }
 
 
+async def qr_evolution() -> dict:
+    """Estado da instancia e, se nao estiver conectada, o QR Code novo (imagem base64)."""
+    base, chave, inst = _evo_conf()
+    if not (base and chave and inst):
+        return {"erro": "Evolution nao configurada"}
+    try:
+        async with httpx.AsyncClient(timeout=20) as http:
+            st = await http.get(f"{base}/instance/connectionState/{inst}", headers={"apikey": chave})
+            estado = str(((st.json() or {}).get("instance") or {}).get("state", "")).lower() if st.status_code < 300 else ""
+            if estado == "open":
+                return {"conectado": True}
+            c = await http.get(f"{base}/instance/connect/{inst}", headers={"apikey": chave})
+            d = c.json() if c.status_code < 300 else {}
+            return {"conectado": False, "qr": d.get("base64", ""), "estado": estado or "sem resposta"}
+    except Exception as e:
+        return {"erro": str(e)}
+
+
 def ultimos_eventos(n: int = 50) -> list[dict]:
     if R is None:
         return []
